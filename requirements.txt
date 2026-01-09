@@ -8,6 +8,6 @@ requests==2.32.3
 urllib3==2.2.2
 
 # --- AI / Torch ---
-torch
-torchvision
+torch==2.5.0
+torchvision==0.20.0
 
