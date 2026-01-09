@@ -6,3 +6,7 @@ pillow==10.4.0
 pillow-heif==0.18.0
 requests==2.32.3
 urllib3==2.2.2
+
+# --- AI / Torch ---
+torch==2.1.2
+torchvision==0.16.2
