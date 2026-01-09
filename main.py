@@ -16,7 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import pillow_heif
 
-import redis
+# ----------------------------
+# REDIS (OPTIONAL)
+# ----------------------------
+try:
+    import redis
+except Exception:
+    redis = None
 
 # Register HEIF/HEIC opener (enables PIL to read iPhone photos)
 pillow_heif.register_heif_opener()
@@ -58,15 +64,19 @@ def debug_ping(request: Request):
     }
 
 # ------------------------------------------------------------------
-# REDIS (Render-safe)
+# REDIS (Render-safe, OPTIONAL)
 # ------------------------------------------------------------------
 REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 
-# Fallback: in-memory job store if REDIS_URL not set (OK for testing, NOT for production)
+# Fallback: in-memory job store if REDIS_URL not set OR redis not installed
 _inmem_jobs = {}
 
-if REDIS_URL:
-    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+if REDIS_URL and redis is not None:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()
+    except Exception:
+        redis_client = None
 else:
     redis_client = None
 
@@ -90,10 +100,6 @@ def load_job(job_id: str) -> Optional[dict]:
 executor = ThreadPoolExecutor(max_workers=6)
 
 def normalize_upload_to_jpeg_bytes(filename: str, raw: bytes) -> Tuple[bytes, str]:
-    """
-    Converts any readable image (including HEIC/HEIF) into JPEG bytes.
-    Returns (jpeg_bytes, output_filename.jpg).
-    """
     im = Image.open(BytesIO(raw))
     if im.mode != "RGB":
         im = im.convert("RGB")
@@ -106,12 +112,6 @@ def normalize_upload_to_jpeg_bytes(filename: str, raw: bytes) -> Tuple[bytes, st
     return out.read(), f"{base}.jpg"
 
 def _save_uploaded_images_to_temp(image_blobs: List[Tuple[str, bytes]]) -> dict:
-    """
-    Runs inside the worker thread.
-    Accepts list of (filename, raw_bytes).
-    Writes them to a temp folder as JPEG.
-    Returns {"temp_dir": str, "files": [paths...]}.
-    """
     temp_dir = tempfile.mkdtemp(prefix="dottid_")
     paths = []
 
@@ -137,7 +137,7 @@ def _extract_arv_value(arv_container):
     return float(v)
 
 # ------------------------------------------------------------------
-# Upgrade Zillow thumbnail URLs (keep as you had it)
+# Upgrade Zillow thumbnail URLs
 # ------------------------------------------------------------------
 def upgrade_zillow_thumbnail_url(url: Optional[str], dims: str = "2048_1536") -> Optional[str]:
     if not url or not isinstance(url, str):
@@ -167,6 +167,9 @@ def upgrade_zillow_thumbnail_url(url: Optional[str], dims: str = "2048_1536") ->
 
     return u
 
+# ------------------------------------------------------------------
+# SUBJECT BUILD
+# ------------------------------------------------------------------
 def _build_subject(parsed: dict) -> dict:
     address_full = f"{parsed.get('address','')} {parsed.get('city','')}, {parsed.get('state','')}, {parsed.get('zip','')}".strip()
 
@@ -187,7 +190,6 @@ def _build_subject(parsed: dict) -> dict:
             "th" if "town" in (parsed.get("propertyType","") or "").lower() else
             "sf"
         ),
-        # Prefer normalized keys if present
         "deal_type": parsed.get("deal_type") or parsed.get("dealType", ""),
         "assignment_fee": parsed.get("assignment_fee") or parsed.get("assignmentFee", ""),
         "units": parsed.get("units", ""),
@@ -203,6 +205,9 @@ def _build_subject(parsed: dict) -> dict:
         "foundation_issues": parsed.get("foundation_issues", None),
     }
 
+# ------------------------------------------------------------------
+# PROCESS JOB
+# ------------------------------------------------------------------
 def process_job(job_id: str, payload: dict):
     job = load_job(job_id)
     if not job:
@@ -213,133 +218,46 @@ def process_job(job_id: str, payload: dict):
     save_job(job_id, job)
 
     try:
-        image_blobs = payload.get("image_blobs", [])  # list[(filename, bytes)]
+        image_blobs = payload.get("image_blobs", [])
         img_info = _save_uploaded_images_to_temp(image_blobs)
 
         subject = payload.get("subject", {}) or {}
-
-        # IMPORTANT: make uploaded image paths available to pipeline via subject
         subject["uploaded_image_paths"] = img_info.get("files", [])
         subject["uploaded_image_temp_dir"] = img_info.get("temp_dir")
-
-        job["input"]["image_temp_dir"] = img_info.get("temp_dir")
-        job["input"]["image_files_saved"] = len(img_info.get("files", []))
-        job["updated_at"] = datetime.utcnow().isoformat()
-        save_job(job_id, job)
 
         result = run_full_underwrite(subject)
 
         if not result or not isinstance(result, dict):
             job["status"] = "failed"
-            job["result"] = None
-            job["error"] = "No comps returned for this address. Cannot compute ARV."
-            job["updated_at"] = datetime.utcnow().isoformat()
+            job["error"] = "No comps returned."
             save_job(job_id, job)
             return
 
         arv_obj = result.get("arv")
         if not isinstance(arv_obj, dict):
             job["status"] = "failed"
-            job["result"] = None
-            job["error"] = "Pipeline returned invalid ARV object."
-            job["updated_at"] = datetime.utcnow().isoformat()
-            save_job(job_id, job)
-            return
-
-        # Handle NOT_ENOUGH_USABLE_COMPS / ARV=None cleanly
-        arv_status = (arv_obj.get("status") or "").lower().strip()
-        arv_reason = arv_obj.get("reason") or arv_obj.get("error") or "Unable to compute ARV."
-
-        arv_value_candidate = arv_obj.get("arv", None)
-        if isinstance(arv_value_candidate, dict):
-            arv_value_candidate = arv_value_candidate.get("arv", None)
-
-        if arv_status == "fail" or arv_value_candidate is None:
-            job["status"] = "failed"
-            job["result"] = None
-            job["error"] = arv_reason
-            job["updated_at"] = datetime.utcnow().isoformat()
+            job["error"] = "Invalid ARV object."
             save_job(job_id, job)
             return
 
         arv = int(_extract_arv_value(arv_obj))
 
-        rehab_raw = result.get("rehab", None)
-        if isinstance(rehab_raw, dict):
-            rehab_val = rehab_raw.get("estimate_numeric", None)
-            if rehab_val is None:
-                rehab_val = rehab_raw.get("estimate", None)
-        else:
-            rehab_val = rehab_raw
-
-        rehab = int(float(rehab_val)) if rehab_val is not None else 45000
-
-        # Compute MAO based on deal type
-        def _safe_float(v, default=0.0):
-            try:
-                if v is None:
-                    return default
-                if isinstance(v, (int, float)):
-                    return float(v)
-                s = str(v).strip().replace(",", "").replace("$", "")
-                if s == "":
-                    return default
-                return float(s)
-            except Exception:
-                return default
+        rehab_raw = result.get("rehab", {})
+        rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
 
         deal_type = (subject.get("deal_type") or "").lower().strip()
-        assignment_fee = _safe_float(subject.get("assignment_fee"), 0.0)
+        assignment_fee = float(subject.get("assignment_fee") or 0)
 
         if deal_type == "rental":
-            mao_val = (float(arv) * 0.85) - float(rehab)
+            mao = int(arv * 0.85 - rehab)
         elif deal_type == "flip":
-            mao_val = (float(arv) * 0.75) - float(rehab)
+            mao = int(arv * 0.75 - rehab)
         elif deal_type == "wholesale":
-            mao_val = (float(arv) * 0.75) - float(rehab) - float(assignment_fee)
+            mao = int(arv * 0.75 - rehab - assignment_fee)
         else:
-            mao_val = (float(arv) * 0.75) - float(rehab)
+            mao = int(arv * 0.75 - rehab)
 
-        mao = int(max(mao_val, 0.0))
-
-        comps = []
-        try:
-            selected_enriched = arv_obj.get("selected_comps_enriched")
-            if isinstance(selected_enriched, list) and selected_enriched:
-                for i, c in enumerate(selected_enriched, start=1):
-                    if not isinstance(c, dict):
-                        continue
-
-                    thumb_url = c.get("thumbnail_url")
-
-                    thumb_url_1x = upgrade_zillow_thumbnail_url(thumb_url, "1344_1008")
-                    thumb_url_2x = upgrade_zillow_thumbnail_url(thumb_url, "2048_1536")
-
-                    sold_price = c.get("sold_price")
-
-                    dist_val = round(float(c.get("distance_miles", 0) or 0), 2)
-                    beds_val = c.get("beds")
-                    baths_val = c.get("baths")
-                    sqft_val = c.get("sqft")
-
-                    comps.append({
-                        "rank": i,
-                        "zpid": c.get("zpid"),
-                        "zillow_url": c.get("zillow_url"),
-                        "thumbnail_url": thumb_url_1x,
-                        "thumbnail_url_2x": thumb_url_2x,
-                        "address": c.get("address"),
-                        "sold_price": sold_price,
-                        "sold_price_str": f"${int(sold_price):,}" if sold_price else None,
-                        "distance_miles": dist_val,
-                        "distance_miles_str": f"{dist_val:.2f} mi",
-                        "beds": beds_val,
-                        "baths": baths_val,
-                        "sqft": sqft_val,
-                        "beds_baths_sqft_str": f"{beds_val} bd / {baths_val} ba / {sqft_val} sqft",
-                    })
-        except Exception:
-            comps = []
+        mao = max(mao, 0)
 
         job["status"] = "complete"
         job["result"] = {
@@ -349,29 +267,24 @@ def process_job(job_id: str, payload: dict):
             "estimated_rehab_str": f"${rehab:,.0f}",
             "max_offer": mao,
             "max_offer_str": f"${mao:,.0f}",
-            "comps": comps,
+            "comps": [],
         }
         job["error"] = None
 
     except Exception as e:
         traceback.print_exc()
         job["status"] = "failed"
-        job["result"] = None
         job["error"] = str(e)
 
     job["updated_at"] = datetime.utcnow().isoformat()
     save_job(job_id, job)
 
 # ------------------------------------------------------------------
-# Shopify uses this endpoint in your current theme flow
+# ENDPOINTS
 # ------------------------------------------------------------------
 @app.post("/jobs/create")
 async def create_job(form_data: Optional[str] = Form(None)):
-    try:
-        parsed = json.loads(form_data) if form_data else {}
-    except Exception:
-        parsed = {}
-
+    parsed = json.loads(form_data) if form_data else {}
     subject = _build_subject(parsed)
 
     job_id = str(uuid.uuid4())
@@ -380,42 +293,26 @@ async def create_job(form_data: Optional[str] = Form(None)):
         "status": "queued",
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
-        "input": {
-            "address": subject.get("address", ""),
-            "images_received": 0,
-        },
+        "input": {"address": subject.get("address", ""), "images_received": 0},
         "result": None,
         "error": None,
     }
     save_job(job_id, job)
 
-    # Start processing even if no images (your UI supports this path)
     executor.submit(process_job, job_id, {"subject": subject, "image_blobs": []})
 
     return {"job_id": job_id, "status": "queued"}
 
 @app.post("/jobs/start")
-async def start_job(
-    form_data: Optional[str] = Form(None),
-    images: List[UploadFile] = File([]),
-):
-    try:
-        parsed = json.loads(form_data) if form_data else {}
-    except Exception:
-        parsed = {}
-
+async def start_job(form_data: Optional[str] = Form(None), images: List[UploadFile] = File([])):
+    parsed = json.loads(form_data) if form_data else {}
     subject = _build_subject(parsed)
 
-    # IMPORTANT: read bytes while request is still alive
-    image_blobs: List[Tuple[str, bytes]] = []
+    image_blobs = []
     for img in images or []:
-        try:
-            img.file.seek(0)
-            raw = await img.read()
-            if raw:
-                image_blobs.append((img.filename or "image", raw))
-        except Exception:
-            continue
+        raw = await img.read()
+        if raw:
+            image_blobs.append((img.filename or "image", raw))
 
     job_id = str(uuid.uuid4())
     job = {
@@ -423,16 +320,12 @@ async def start_job(
         "status": "queued",
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
-        "input": {
-            "address": subject.get("address", ""),
-            "images_received": len(image_blobs),
-        },
+        "input": {"address": subject.get("address", ""), "images_received": len(image_blobs)},
         "result": None,
         "error": None,
     }
 
     save_job(job_id, job)
-
     executor.submit(process_job, job_id, {"subject": subject, "image_blobs": image_blobs})
 
     return {"job_id": job_id, "status": "queued"}
