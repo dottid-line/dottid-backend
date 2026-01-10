@@ -16,33 +16,36 @@ from download_models import ensure_models_local
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Default to ".backend-models" (Render-safe). Override with MODEL_DIR if needed.
+# Force ".backend-models" (Render + your desired structure)
 MODEL_DIR_NAME = os.environ.get("MODEL_DIR", ".backend-models").strip() or ".backend-models"
 MODEL_DIR = (BASE_DIR / MODEL_DIR_NAME)
-
-# Fallback: if ".backend-models" doesn't exist locally, use old "models" folder
-if not MODEL_DIR.exists():
-    fallback_dir = BASE_DIR / "models"
-    if fallback_dir.exists():
-        MODEL_DIR = fallback_dir
 
 ROOM_MODEL_PATH = str(MODEL_DIR / "FINAL MVP ROOM TYPE MODEL.pth")
 CONDITION_MODEL_PATH = str(MODEL_DIR / "FINAL MVP CONDITION MODEL.pth")
 VALIDATOR_MODEL_PATH = str(MODEL_DIR / "FINAL MVP VALIDATOR MODEL.pth")
 
 # ===================================================================
-# LOAD MODELS ONCE — LAZY INIT (prevents import-time crash on Render)
+# LOAD MODELS ONCE — LAZY INIT
 # ===================================================================
 
 _room_model = None
 _condition_model = None
 _validator_model = None
 
+def _assert_exists(p: str):
+    if not os.path.exists(p):
+        raise RuntimeError(f"Model file missing on disk: {p}")
+
 def _get_models():
     global _room_model, _condition_model, _validator_model
 
     # Ensure models exist locally (download from S3 on Render if missing)
     ensure_models_local(MODEL_DIR)
+
+    # Hard assert so we never try torch.load() on missing files
+    _assert_exists(ROOM_MODEL_PATH)
+    _assert_exists(CONDITION_MODEL_PATH)
+    _assert_exists(VALIDATOR_MODEL_PATH)
 
     if _room_model is None or _condition_model is None or _validator_model is None:
         _room_model, _condition_model, _validator_model = load_models(
@@ -155,6 +158,5 @@ def classify_image(img_path, device: str = "cpu") -> dict:
 def classify_images(image_paths, device: str = "cpu") -> list[dict]:
     results: list[dict] = []
     for img_path in image_paths:
-        out = classify_image(img_path, device)
-        results.append(out)
+        results.append(classify_image(img_path, device))
     return results
