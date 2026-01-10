@@ -10,4 +10,5 @@ urllib3==2.2.2
 # --- AI / Torch ---
 torch==2.5.0
 torchvision==0.20.0
+boto3==1.34.162
 
