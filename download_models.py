@@ -1,42 +1,50 @@
 # download_models.py
 import os
 from pathlib import Path
-
 import boto3
+from botocore.exceptions import ClientError
 
-DEFAULT_BUCKET = os.environ.get("MODEL_S3_BUCKET", "dottid-backend-models").strip()
-DEFAULT_REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-2")).strip()
+BUCKET_NAME = os.environ.get("MODEL_S3_BUCKET", "dottid-backend-models").strip()
+AWS_REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-2")).strip()
 
-MODEL_FILENAMES = [
+MODEL_FILES = [
     "FINAL MVP ROOM TYPE MODEL.pth",
     "FINAL MVP CONDITION MODEL.pth",
     "FINAL MVP VALIDATOR MODEL.pth",
 ]
 
-def ensure_models_local(model_dir: Path) -> dict:
-    """
-    Ensures required model files exist locally in model_dir.
-    Downloads from S3 if missing.
+def _s3_client():
+    return boto3.client("s3", region_name=AWS_REGION)
 
-    Env expected on Render:
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
-      - (optional) AWS_SESSION_TOKEN
-      - AWS_REGION or AWS_DEFAULT_REGION (you have us-east-2)
-      - (optional) MODEL_S3_BUCKET
+def ensure_models_local(model_dir: Path):
     """
+    Ensures the 3 .pth files exist in model_dir.
+    Downloads from S3 if missing.
+    HARD FAILS if download fails or file still missing.
+    """
+    model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    s3 = boto3.client("s3", region_name=DEFAULT_REGION)
+    s3 = _s3_client()
 
-    downloaded = []
-    for fname in MODEL_FILENAMES:
+    for fname in MODEL_FILES:
         local_path = model_dir / fname
         if local_path.exists() and local_path.stat().st_size > 0:
             continue
 
-        # models sit directly under bucket root (no folder prefix)
-        s3.download_file(DEFAULT_BUCKET, fname, str(local_path))
-        downloaded.append(fname)
+        key = fname  # your objects sit directly under the bucket root
+        try:
+            # Try download
+            s3.download_file(BUCKET_NAME, key, str(local_path))
+        except ClientError as e:
+            raise RuntimeError(
+                f"S3 download failed for bucket='{BUCKET_NAME}' key='{key}' "
+                f"region='{AWS_REGION}' -> {e}"
+            )
 
-    return {"bucket": DEFAULT_BUCKET, "region": DEFAULT_REGION, "downloaded": downloaded}
+        # Verify post-download
+        if not local_path.exists() or local_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"Downloaded model is missing/empty: {local_path} "
+                f"(bucket='{BUCKET_NAME}', key='{key}', region='{AWS_REGION}')"
+            )
