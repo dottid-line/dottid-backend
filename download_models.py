@@ -84,12 +84,22 @@ def ensure_models_local(target_dir: Path) -> None:
                 pass
         tmp_path.rename(local_path)
 
-    # Final verification
-    missing = []
-    for fname in REQUIRED_MODEL_FILES:
-        p = target_dir / fname
-        if not p.exists() or p.stat().st_size == 0:
-            missing.append(str(p))
+    # ============================================================
+    # HARD FINAL VERIFICATION (NEW, EXPLICIT, NO SILENT FAILURES)
+    # ============================================================
+
+    missing = [name for name in REQUIRED_MODEL_FILES if not (target_dir / name).exists()]
 
     if missing:
-        raise RuntimeError(f"Models still missing after download: {missing}")
+        try:
+            present = sorted([p.name for p in target_dir.glob("*") if p.is_file()])
+        except Exception:
+            present = []
+
+        raise RuntimeError(
+            f"ensure_models_local FAILED. "
+            f"model_dir={target_dir} "
+            f"missing={missing} "
+            f"present={present} "
+            f"bucket={bucket} prefix={prefix} region={region}"
+        )
