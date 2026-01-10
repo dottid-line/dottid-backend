@@ -1,3 +1,4 @@
+raise RuntimeError("DEPLOY_PROOF: model_loader is updated and being imported")
 # model_loader.py
 # Loads Validator, Room Type, and Condition ConvNeXt models with FIXED class order
 
