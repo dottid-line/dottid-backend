@@ -14,11 +14,11 @@ from download_models import ensure_models_local
 # MODEL PATHS
 # ===================================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-
-# Force ".backend-models" (Render + your desired structure)
-MODEL_DIR_NAME = os.environ.get("MODEL_DIR", ".backend-models").strip() or ".backend-models"
-MODEL_DIR = (BASE_DIR / MODEL_DIR_NAME)
+# Render-safe writable default:
+# - If MODEL_DIR is set, use it
+# - Else use /tmp/.backend-models
+MODEL_DIR_NAME = os.environ.get("MODEL_DIR", "/tmp/.backend-models").strip() or "/tmp/.backend-models"
+MODEL_DIR = Path(MODEL_DIR_NAME)
 
 ROOM_MODEL_PATH = str(MODEL_DIR / "FINAL MVP ROOM TYPE MODEL.pth")
 CONDITION_MODEL_PATH = str(MODEL_DIR / "FINAL MVP CONDITION MODEL.pth")
@@ -32,20 +32,11 @@ _room_model = None
 _condition_model = None
 _validator_model = None
 
-def _assert_exists(p: str):
-    if not os.path.exists(p):
-        raise RuntimeError(f"Model file missing on disk: {p}")
-
 def _get_models():
     global _room_model, _condition_model, _validator_model
 
     # Ensure models exist locally (download from S3 on Render if missing)
     ensure_models_local(MODEL_DIR)
-
-    # Hard assert so we never try torch.load() on missing files
-    _assert_exists(ROOM_MODEL_PATH)
-    _assert_exists(CONDITION_MODEL_PATH)
-    _assert_exists(VALIDATOR_MODEL_PATH)
 
     if _room_model is None or _condition_model is None or _validator_model is None:
         _room_model, _condition_model, _validator_model = load_models(
@@ -158,5 +149,6 @@ def classify_image(img_path, device: str = "cpu") -> dict:
 def classify_images(image_paths, device: str = "cpu") -> list[dict]:
     results: list[dict] = []
     for img_path in image_paths:
-        results.append(classify_image(img_path, device))
+        out = classify_image(img_path, device)
+        results.append(out)
     return results
