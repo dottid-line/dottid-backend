@@ -97,7 +97,14 @@ def load_job(job_id: str) -> Optional[dict]:
 # ------------------------------------------------------------------
 # WORKER POOL (BACKGROUND ONLY)
 # ------------------------------------------------------------------
-executor = ThreadPoolExecutor(max_workers=6)
+# CHANGE: default to 1 worker to reduce memory pressure on small instances.
+try:
+    _job_workers = int((os.environ.get("JOB_WORKERS", "1") or "1").strip())
+except Exception:
+    _job_workers = 1
+_job_workers = max(1, min(_job_workers, 6))
+
+executor = ThreadPoolExecutor(max_workers=_job_workers)
 
 def normalize_upload_to_jpeg_bytes(filename: str, raw: bytes) -> Tuple[bytes, str]:
     im = Image.open(BytesIO(raw))
