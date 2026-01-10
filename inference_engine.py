@@ -8,20 +8,19 @@ from PIL import Image
 from pathlib import Path
 
 from model_loader import load_models
-from download_models import download_models  # CHANGE: ensure models exist locally (download from S3)
+from download_models import ensure_models_local
 
 # ===================================================================
-# MODEL PATHS — MUST MATCH REAL FILENAMES EXACTLY IN YOUR DIRECTORY
+# MODEL PATHS
 # ===================================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# CHANGE: default to ".backend-models" (Render + your desired structure)
-# You can override with an environment variable MODEL_DIR if needed.
+# Default to ".backend-models" (Render-safe). Override with MODEL_DIR if needed.
 MODEL_DIR_NAME = os.environ.get("MODEL_DIR", ".backend-models").strip() or ".backend-models"
 MODEL_DIR = (BASE_DIR / MODEL_DIR_NAME)
 
-# Fallback: if ".backend-models" doesn't exist locally, use the old "models" folder
+# Fallback: if ".backend-models" doesn't exist locally, use old "models" folder
 if not MODEL_DIR.exists():
     fallback_dir = BASE_DIR / "models"
     if fallback_dir.exists():
@@ -42,20 +41,8 @@ _validator_model = None
 def _get_models():
     global _room_model, _condition_model, _validator_model
 
-    # CHANGE: download models on first use (before torch.load happens)
-    # This will populate ./models (or whatever your download_models.py uses).
-    download_models()
-
-    # Re-evaluate MODEL_DIR if your downloader writes to ./models
-    # (keeps behavior if you're using .backend-models locally)
-    global MODEL_DIR, ROOM_MODEL_PATH, CONDITION_MODEL_PATH, VALIDATOR_MODEL_PATH
-    if not MODEL_DIR.exists():
-        fallback_dir = BASE_DIR / "models"
-        if fallback_dir.exists():
-            MODEL_DIR = fallback_dir
-            ROOM_MODEL_PATH = str(MODEL_DIR / "FINAL MVP ROOM TYPE MODEL.pth")
-            CONDITION_MODEL_PATH = str(MODEL_DIR / "FINAL MVP CONDITION MODEL.pth")
-            VALIDATOR_MODEL_PATH = str(MODEL_DIR / "FINAL MVP VALIDATOR MODEL.pth")
+    # Ensure models exist locally (download from S3 on Render if missing)
+    ensure_models_local(MODEL_DIR)
 
     if _room_model is None or _condition_model is None or _validator_model is None:
         _room_model, _condition_model, _validator_model = load_models(
@@ -81,11 +68,6 @@ img_tf = transforms.Compose(
 # ===================================================================
 
 def classify_validity(img_path, device: str = "cpu"):
-    """
-    Returns:
-        (label: str, confidence: float)
-    label is whatever the validator model's classes define, e.g. "valid"/"invalid".
-    """
     try:
         img = Image.open(img_path).convert("RGB")
     except Exception:
@@ -108,27 +90,8 @@ def classify_validity(img_path, device: str = "cpu"):
 # ===================================================================
 
 def classify_image(img_path, device: str = "cpu") -> dict:
-    """
-    Classify a single image for:
-      - validity
-      - room_type
-      - condition
-
-    Returns a dict with:
-      {
-        "image_path": str,
-        "valid": bool,
-        "valid_conf": float,
-        "room_type": str,
-        "room_conf": float,
-        "condition": str,
-        "condition_conf": float,
-      }
-    """
-
     validity, valid_conf = classify_validity(img_path, device)
 
-    # Hard gate on validity before running heavy models
     if validity == "invalid" or valid_conf < 0.60:
         return {
             "image_path": img_path,
@@ -143,7 +106,6 @@ def classify_image(img_path, device: str = "cpu") -> dict:
     try:
         img = Image.open(img_path).convert("RGB")
     except Exception:
-        # If we can't even open the image after passing the validator, treat as invalid/error
         return {
             "image_path": img_path,
             "valid": False,
@@ -158,9 +120,7 @@ def classify_image(img_path, device: str = "cpu") -> dict:
 
     room_model, condition_model, validator_model = _get_models()
 
-    # -------------------------------------------------
     # ROOM TYPE
-    # -------------------------------------------------
     with torch.no_grad():
         room_logits = room_model(tensor_img)
         room_probs = F.softmax(room_logits, dim=1)
@@ -169,9 +129,7 @@ def classify_image(img_path, device: str = "cpu") -> dict:
     room_label = room_model.classes[room_idx.item()]
     room_conf = round(room_conf.item(), 4)
 
-    # -------------------------------------------------
     # CONDITION
-    # -------------------------------------------------
     with torch.no_grad():
         cond_logits = condition_model(tensor_img)
         cond_probs = F.softmax(cond_logits, dim=1)
@@ -195,11 +153,6 @@ def classify_image(img_path, device: str = "cpu") -> dict:
 # ===================================================================
 
 def classify_images(image_paths, device: str = "cpu") -> list[dict]:
-    """
-    Classify a list of image paths.
-
-    Returns a list of per-image dicts in the same format as classify_image().
-    """
     results: list[dict] = []
     for img_path in image_paths:
         out = classify_image(img_path, device)
