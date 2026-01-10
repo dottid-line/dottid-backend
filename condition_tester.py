@@ -9,6 +9,8 @@ import numpy as np
 from typing import List, Dict, Any
 from pathlib import Path
 
+from download_models import ensure_models_local
+
 # ============================================================
 # PATHS
 # ============================================================
@@ -88,6 +90,9 @@ COND_SCORE = {
 _models = None
 
 def _load_validator():
+    # Ensure models exist locally (download from S3 if missing)
+    ensure_models_local(Path(os.environ.get("MODEL_DIR", "/tmp/.backend-models")).resolve())
+
     m = models.convnext_tiny(weights=None)
     m.classifier[2] = nn.Linear(m.classifier[2].in_features, 2)
     m.load_state_dict(torch.load(VALIDATOR_MODEL_PATH, map_location=device))
@@ -95,6 +100,9 @@ def _load_validator():
     return m
 
 def _load_roomtype():
+    # Ensure models exist locally (download from S3 if missing)
+    ensure_models_local(Path(os.environ.get("MODEL_DIR", "/tmp/.backend-models")).resolve())
+
     m = models.convnext_tiny(weights=None)
     m.classifier[2] = nn.Linear(m.classifier[2].in_features, 5)
     m.load_state_dict(torch.load(ROOMTYPE_MODEL_PATH, map_location=device))
@@ -102,6 +110,9 @@ def _load_roomtype():
     return m
 
 def _load_condition():
+    # Ensure models exist locally (download from S3 if missing)
+    ensure_models_local(Path(os.environ.get("MODEL_DIR", "/tmp/.backend-models")).resolve())
+
     m = models.convnext_tiny(weights=None)
     m.classifier[2] = nn.Linear(m.classifier[2].in_features, 4)
     m.load_state_dict(torch.load(CONDITION_MODEL_PATH, map_location=device))
