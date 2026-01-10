@@ -5,6 +5,10 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
+from pathlib import Path
+
+# NEW: force model download before torch.load
+from download_models import ensure_models_local
 
 # ============================================================
 # FIXED CLASS ORDERS (must match TRAINING ORDER exactly)
@@ -41,6 +45,17 @@ def load_convnext_model(model_path, num_classes):
     """
     Loads a ConvNeXt Tiny model and replaces the classifier layer.
     """
+
+    # --- NEW: FORCE DOWNLOAD BEFORE LOADING ---
+    model_path_p = Path(model_path)
+    ensure_models_local(model_path_p.parent)
+
+    if not model_path_p.exists():
+        raise FileNotFoundError(
+            f"Model file still missing after ensure_models_local(): {model_path}"
+        )
+    # -----------------------------------------
+
     model = models.convnext_tiny(weights=None)  # No pretrained weights
     model.classifier[2] = nn.Linear(model.classifier[2].in_features, num_classes)
 
