@@ -32,11 +32,43 @@ _room_model = None
 _condition_model = None
 _validator_model = None
 
+
+def _ensure_models_or_raise() -> None:
+    """
+    Ensures model files exist locally. If they do not exist after ensure_models_local(),
+    raise a clear error so jobs fail with the REAL reason (download didn't happen),
+    instead of a confusing torch file-not-found later.
+    """
+    # Ensure models exist locally (download from S3 on Render if missing)
+    ensure_models_local(MODEL_DIR)
+
+    # Hard check: files must exist after ensure_models_local()
+    missing = []
+    if not Path(ROOM_MODEL_PATH).exists():
+        missing.append(Path(ROOM_MODEL_PATH).name)
+    if not Path(CONDITION_MODEL_PATH).exists():
+        missing.append(Path(CONDITION_MODEL_PATH).name)
+    if not Path(VALIDATOR_MODEL_PATH).exists():
+        missing.append(Path(VALIDATOR_MODEL_PATH).name)
+
+    if missing:
+        # Include dir listing to make debugging on Render obvious
+        try:
+            present = sorted([p.name for p in MODEL_DIR.glob("*") if p.is_file()])
+        except Exception:
+            present = []
+        raise FileNotFoundError(
+            f"Model files missing in '{str(MODEL_DIR)}': {missing}. "
+            f"Present files: {present}. "
+            f"ensure_models_local() did not download/copy the required .pth files."
+        )
+
+
 def _get_models():
     global _room_model, _condition_model, _validator_model
 
     # Ensure models exist locally (download from S3 on Render if missing)
-    ensure_models_local(MODEL_DIR)
+    _ensure_models_or_raise()
 
     if _room_model is None or _condition_model is None or _validator_model is None:
         _room_model, _condition_model, _validator_model = load_models(
@@ -45,6 +77,7 @@ def _get_models():
             VALIDATOR_MODEL_PATH,
         )
     return _room_model, _condition_model, _validator_model
+
 
 # ===================================================================
 # TRANSFORM
