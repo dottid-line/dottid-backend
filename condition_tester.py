@@ -7,16 +7,43 @@ from torchvision import transforms, models
 from PIL import Image
 import numpy as np
 from typing import List, Dict, Any
+from pathlib import Path
 
 # ============================================================
 # PATHS
 # ============================================================
-IMAGE_FOLDER = r"C:\FINAL MVP MODEL\Test comp rating"
-IMAGE_FOLDER = os.environ.get("IMAGE_FOLDER", IMAGE_FOLDER)
 
-VALIDATOR_MODEL_PATH = r"C:\FINAL MVP MODEL\FINAL MVP VALIDATOR MODEL.pth"
-ROOMTYPE_MODEL_PATH  = r"C:\FINAL MVP MODEL\FINAL MVP ROOM TYPE MODEL.pth"
-CONDITION_MODEL_PATH = r"C:\FINAL MVP MODEL\FINAL MVP CONDITION MODEL.pth"
+# CHANGE: default everything to your repo-relative structure instead of hardcoded C:\ paths.
+# - Models default to: <repo>/ .backend-models / <file>.pth
+# - You can override with env vars:
+#     MODEL_DIR
+#     VALIDATOR_MODEL_PATH
+#     ROOMTYPE_MODEL_PATH
+#     CONDITION_MODEL_PATH
+#
+# Image folder default is repo-relative too, but can be overridden with IMAGE_FOLDER env var.
+
+BASE_DIR = Path(__file__).resolve().parent
+
+MODEL_DIR_NAME = os.environ.get("MODEL_DIR", ".backend-models").strip() or ".backend-models"
+MODEL_DIR = (BASE_DIR / MODEL_DIR_NAME)
+
+# Fallback: if ".backend-models" doesn't exist, use old "models" folder if present
+if not MODEL_DIR.exists():
+    fallback_dir = BASE_DIR / "models"
+    if fallback_dir.exists():
+        MODEL_DIR = fallback_dir
+
+DEFAULT_IMAGE_FOLDER = str(BASE_DIR / "Test comp rating")
+IMAGE_FOLDER = os.environ.get("IMAGE_FOLDER", DEFAULT_IMAGE_FOLDER)
+
+DEFAULT_VALIDATOR_MODEL_PATH = str(MODEL_DIR / "FINAL MVP VALIDATOR MODEL.pth")
+DEFAULT_ROOMTYPE_MODEL_PATH  = str(MODEL_DIR / "FINAL MVP ROOM TYPE MODEL.pth")
+DEFAULT_CONDITION_MODEL_PATH = str(MODEL_DIR / "FINAL MVP CONDITION MODEL.pth")
+
+VALIDATOR_MODEL_PATH = os.environ.get("VALIDATOR_MODEL_PATH", DEFAULT_VALIDATOR_MODEL_PATH)
+ROOMTYPE_MODEL_PATH  = os.environ.get("ROOMTYPE_MODEL_PATH",  DEFAULT_ROOMTYPE_MODEL_PATH)
+CONDITION_MODEL_PATH = os.environ.get("CONDITION_MODEL_PATH", DEFAULT_CONDITION_MODEL_PATH)
 
 # ============================================================
 # DEVICE
@@ -275,6 +302,12 @@ def score_folder(folder: str) -> Dict[str, Any]:
 # ============================================================
 if __name__ == "__main__":
     print("Using device:", device)
+    print("IMAGE_FOLDER:", IMAGE_FOLDER)
+    print("MODEL_DIR:", str(MODEL_DIR))
+    print("VALIDATOR_MODEL_PATH:", VALIDATOR_MODEL_PATH)
+    print("ROOMTYPE_MODEL_PATH:", ROOMTYPE_MODEL_PATH)
+    print("CONDITION_MODEL_PATH:", CONDITION_MODEL_PATH)
+
     res = score_folder(IMAGE_FOLDER)
 
     if res.get("skip_reason"):
