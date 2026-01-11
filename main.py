@@ -154,14 +154,10 @@ def upgrade_zillow_thumbnail_url(url: Optional[str], dims: str = "2048_1536") ->
     if not u:
         return u
 
+    # CHANGE: If URL is an uncropped_scaled_within_* variant, force reliable cc_ft thumbnail.
     if "uncropped_scaled_within_" in u:
-        u2 = re.sub(
-            r"(uncropped_scaled_within_)\d+_\d+",
-            r"\g<1>" + dims,
-            u,
-            flags=re.IGNORECASE
-        )
-        return u2
+        base = u.split("-uncropped_scaled_within_")[0]
+        return base + "-cc_ft_768.jpg"
 
     m = re.match(
         r"^(https?://photos\.zillowstatic\.com/fp/[^-]+)-cc_ft_\d+\.(jpg|jpeg|png|webp)$",
@@ -169,8 +165,8 @@ def upgrade_zillow_thumbnail_url(url: Optional[str], dims: str = "2048_1536") ->
         re.IGNORECASE
     )
     if m:
-        base = m.group(1)
-        return base + f"-uncropped_scaled_within_{dims}.jpg"
+        # Keep existing cc_ft URLs as-is.
+        return u
 
     return u
 
