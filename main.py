@@ -266,6 +266,58 @@ def process_job(job_id: str, payload: dict):
 
         mao = max(mao, 0)
 
+        # ----------------------------
+        # COMPS: pull from underwriting result (enriched comps)
+        # ----------------------------
+        comps_out = []
+
+        # Most likely location
+        try:
+            if isinstance(arv_obj, dict):
+                comps_out = arv_obj.get("selected_comps_enriched") or []
+        except Exception:
+            comps_out = []
+
+        # Fallbacks (in case orchestrator nests it differently)
+        if not comps_out:
+            try:
+                arv2 = (result.get("arv") if isinstance(result, dict) else None)
+                if isinstance(arv2, dict):
+                    comps_out = arv2.get("selected_comps_enriched") or []
+            except Exception:
+                comps_out = []
+
+        if not comps_out:
+            try:
+                if isinstance(arv_obj, dict):
+                    comps_out = arv_obj.get("selected_comps") or []
+            except Exception:
+                comps_out = []
+
+        # Normalize + upgrade thumbnail URLs
+        normalized_comps = []
+        for c in comps_out if isinstance(comps_out, list) else []:
+            if not isinstance(c, dict):
+                continue
+
+            thumb = c.get("thumbnail_url") or c.get("thumbnail") or c.get("thumb")
+            thumb = upgrade_zillow_thumbnail_url(thumb)
+
+            normalized_comps.append(
+                {
+                    "zpid": c.get("zpid"),
+                    "address": c.get("address"),
+                    "sold_price": c.get("sold_price"),
+                    "sold_price_str": (f"${int(c.get('sold_price')):,.0f}" if c.get("sold_price") else None),
+                    "distance_miles": c.get("distance_miles"),
+                    "beds": c.get("beds"),
+                    "baths": c.get("baths"),
+                    "sqft": c.get("sqft"),
+                    "zillow_url": c.get("zillow_url") or c.get("url"),
+                    "thumbnail_url": thumb,
+                }
+            )
+
         job["status"] = "complete"
         job["result"] = {
             "arv": arv,
@@ -274,7 +326,7 @@ def process_job(job_id: str, payload: dict):
             "estimated_rehab_str": f"${rehab:,.0f}",
             "max_offer": mao,
             "max_offer_str": f"${mao:,.0f}",
-            "comps": [],
+            "comps": normalized_comps,
         }
         job["error"] = None
 
