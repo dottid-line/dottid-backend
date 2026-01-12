@@ -238,24 +238,9 @@ def process_job(job_id: str, payload: dict):
 
         # ----------------------------
         # CHANGE: Handle NOT_ENOUGH_USABLE_COMPS as a terminal "complete" result
-        # Detect from top-level OR from result["arv"] object.
         # ----------------------------
-        arv_obj_for_check = result.get("arv")
-        top_code = result.get("result_code") or result.get("error_code") or result.get("result")
-
-        arv_status = ""
-        arv_message = ""
-        if isinstance(arv_obj_for_check, dict):
-            arv_status = str(arv_obj_for_check.get("status", "")).strip()
-            arv_message = str(arv_obj_for_check.get("message", "")).strip()
-
-        code_hits = []
-        for v in [top_code, arv_status, arv_message]:
-            if v is None:
-                continue
-            code_hits.append(str(v).upper().strip())
-
-        if "NOT_ENOUGH_USABLE_COMPS" in code_hits:
+        result_code = result.get("result_code") or result.get("error_code") or result.get("result")
+        if isinstance(result_code, str) and result_code.strip().upper() == "NOT_ENOUGH_USABLE_COMPS":
             rehab_raw = result.get("rehab", {}) or {}
             rehab = int(float(rehab_raw.get("estimate_numeric", 0) or 0))
 
