@@ -243,6 +243,31 @@ def process_job(job_id: str, payload: dict):
             save_job(job_id, job)
             return
 
+        # ------------------------------------------------------------------
+        # CHANGE: Graceful completion when ARV cannot be computed due to comps
+        # ------------------------------------------------------------------
+        arv_status = str(arv_obj.get("status") or "").lower().strip()
+        arv_msg = str(arv_obj.get("message") or "").upper().strip()
+
+        if arv_status == "fail" and arv_msg == "NOT_ENOUGH_USABLE_COMPS":
+            rehab_raw = result.get("rehab", {})
+            rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
+
+            job["status"] = "complete"
+            job["result"] = {
+                "arv": "NOT_ENOUGH_USABLE_COMPS",
+                "arv_str": "NOT_ENOUGH_USABLE_COMPS",
+                "estimated_rehab": rehab,
+                "estimated_rehab_str": f"${rehab:,.0f}",
+                "max_offer": None,
+                "max_offer_str": "",
+                "comps": [],
+            }
+            job["error"] = None
+            job["updated_at"] = datetime.utcnow().isoformat()
+            save_job(job_id, job)
+            return
+
         arv = int(_extract_arv_value(arv_obj))
 
         rehab_raw = result.get("rehab", {})
@@ -403,6 +428,12 @@ def job_results(job_id: str):
     job = load_job(job_id)
     if not job:
         return {"error": "not_found"}
+
+    # ------------------------------------------------------------------
+    # CHANGE: failed jobs should be terminal (not "not_ready" forever)
+    # ------------------------------------------------------------------
+    if job.get("status") == "failed":
+        return {"error": "failed", "message": job.get("error") or "Unknown error"}
 
     if job.get("status") != "complete":
         return {"error": "not_ready"}
