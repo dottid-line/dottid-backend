@@ -39,6 +39,16 @@ def run_full_underwrite(subject, logger=None):
     # IMPORTANT: expose the ARV OBJECT (not the whole pipeline dict) at result["arv"]
     arv_section = pipeline_out.get("arv", {})
 
+    # ---------------------------------------------------
+    # CHANGE: Detect NOT_ENOUGH_USABLE_COMPS and return a stable, frontend-friendly signal
+    # ---------------------------------------------------
+    not_enough_usable_comps = False
+    if isinstance(arv_section, dict):
+        status_val = str(arv_section.get("status", "")).upper().strip()
+        msg_val = str(arv_section.get("message", "")).upper().strip()
+        if status_val == "FAIL" and msg_val == "NOT_ENOUGH_USABLE_COMPS":
+            not_enough_usable_comps = True
+
     # robust ARV extraction
     arv_value = 0
     if isinstance(arv_section, dict):
@@ -68,12 +78,16 @@ def run_full_underwrite(subject, logger=None):
     # ---------------------------------------------------
     log("STEP 3 → Computing MAO...")
 
-    mao_str = compute_mao(
-        arv_value,
-        rehab_cost,
-        subject.get("assignment_fee", 0),
-        subject.get("deal_type", ""),
-    )
+    # CHANGE: If NOT_ENOUGH_USABLE_COMPS, MAO is unavailable (because ARV is unavailable)
+    if not_enough_usable_comps:
+        mao_str = "—"
+    else:
+        mao_str = compute_mao(
+            arv_value,
+            rehab_cost,
+            subject.get("assignment_fee", 0),
+            subject.get("deal_type", ""),
+        )
 
     log("STEP 3 COMPLETE.")
 
@@ -91,6 +105,13 @@ def run_full_underwrite(subject, logger=None):
             "mao_formatted": mao_str,
         },
     }
+
+    # CHANGE: Add explicit top-level signals ONLY for NOT_ENOUGH_USABLE_COMPS
+    if not_enough_usable_comps:
+        result["status"] = "fail"
+        result["result_code"] = "NOT_ENOUGH_USABLE_COMPS"
+        result["error_code"] = "NOT_ENOUGH_USABLE_COMPS"
+        result["result"] = "NOT_ENOUGH_USABLE_COMPS"
 
     log("DONE → run_full_underwrite() COMPLETE.")
     return result
