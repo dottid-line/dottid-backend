@@ -176,6 +176,32 @@ def upgrade_zillow_thumbnail_url(url: Optional[str], dims: str = "2048_1536") ->
 def _build_subject(parsed: dict) -> dict:
     address_full = f"{parsed.get('address','')} {parsed.get('city','')}, {parsed.get('state','')}, {parsed.get('zip','')}".strip()
 
+    # CHANGE: accept optional subject Zillow identifiers for reliable subject thumbnail retrieval
+    subject_zillow_url = (
+        parsed.get("subject_zillow_url")
+        or parsed.get("subjectZillowUrl")
+        or parsed.get("zillow_url")
+        or parsed.get("zillowUrl")
+        or parsed.get("url")
+    )
+    subject_zpid = (
+        parsed.get("subject_zpid")
+        or parsed.get("subjectZpid")
+        or parsed.get("zpid")
+    )
+
+    try:
+        if subject_zpid is not None and str(subject_zpid).strip() != "":
+            subject_zpid = str(subject_zpid).strip()
+    except Exception:
+        pass
+
+    try:
+        if subject_zillow_url is not None and str(subject_zillow_url).strip() != "":
+            subject_zillow_url = str(subject_zillow_url).strip()
+    except Exception:
+        pass
+
     return {
         "address": address_full,
         "street": parsed.get("address", ""),
@@ -206,6 +232,10 @@ def _build_subject(parsed: dict) -> dict:
         "roof_needed": parsed.get("roof_needed", None),
         "hvac_needed": parsed.get("hvac_needed", None),
         "foundation_issues": parsed.get("foundation_issues", None),
+
+        # CHANGE: pass-through fields used by pipeline to fetch subject thumbnail
+        "subject_zillow_url": subject_zillow_url,
+        "subject_zpid": subject_zpid,
     }
 
 # ------------------------------------------------------------------

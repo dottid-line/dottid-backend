@@ -1367,19 +1367,50 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     print(f"\nTotal comps collected (after dedupe/top-up): {len(comps_all)}\n")
 
     # -----------------------------------------------
-    # SUBJECT THUMBNAIL: try to find subject listing from search results
-    # (reuses existing search scrape results; no new Apify run)
+    # SUBJECT THUMBNAIL: choose a reliable subject detail URL
+    # Priority:
+    #   1) subject["subject_zillow_url"] / ["subjectZillowUrl"]
+    #   2) subject["subject_zpid"] / ["subjectZpid"] -> build url
+    #   3) fallback heuristic from comps search results (existing behavior)
     # -----------------------------------------------
     subject_detail_url = None
+    subject_zpid = None
     try:
-        subj_candidate = _find_subject_candidate_in_comps(address, comps_all)
-        if isinstance(subj_candidate, dict):
-            raw_sc = subj_candidate.get("raw") or {}
-            subject_detail_url = raw_sc.get("detailUrl") or raw_sc.get("detail_url") or raw_sc.get("url") or subj_candidate.get("url")
-            if isinstance(subject_detail_url, str):
-                subject_detail_url = _norm_url(subject_detail_url)
+        subject_detail_url = (
+            subject.get("subject_zillow_url")
+            or subject.get("subjectZillowUrl")
+            or subject.get("zillow_url")
+            or subject.get("zillowUrl")
+        )
+        if isinstance(subject_detail_url, str):
+            subject_detail_url = _norm_url(subject_detail_url)
+
+        subject_zpid = (
+            subject.get("subject_zpid")
+            or subject.get("subjectZpid")
+            or subject.get("zpid")
+        )
+        if subject_zpid is not None:
+            subject_zpid = str(subject_zpid).strip()
     except Exception:
         subject_detail_url = None
+        subject_zpid = None
+
+    if not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
+        built = _build_zillow_url_from_zpid(subject_zpid) if subject_zpid else None
+        if isinstance(built, str) and built.startswith("http"):
+            subject_detail_url = built
+
+    if not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
+        try:
+            subj_candidate = _find_subject_candidate_in_comps(address, comps_all)
+            if isinstance(subj_candidate, dict):
+                raw_sc = subj_candidate.get("raw") or {}
+                subject_detail_url = raw_sc.get("detailUrl") or raw_sc.get("detail_url") or raw_sc.get("url") or subj_candidate.get("url")
+                if isinstance(subject_detail_url, str):
+                    subject_detail_url = _norm_url(subject_detail_url)
+        except Exception:
+            subject_detail_url = None
 
     # ===============================================
     # STEP 4 — SIMILARITY RANKING
@@ -1500,10 +1531,26 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     # Extract subject thumbnail_url (same logic as comps: first fp photo URL)
     subject_thumbnail_url = None
     try:
+        di = None
+
+        # First try URL key (normalized)
         if isinstance(subject_detail_url, str) and subject_detail_url:
-            di = by_url.get(_norm_url(subject_detail_url))
-            if isinstance(di, dict):
-                subject_thumbnail_url = _thumbnail_url_from_detail_item(di)
+            key = _norm_url(subject_detail_url)
+            di = by_url.get(key)
+
+            # Fallback: try adding/removing trailing slash
+            if di is None:
+                if key.endswith("/"):
+                    di = by_url.get(key[:-1])
+                else:
+                    di = by_url.get(key + "/")
+
+        # Fallback: try zpid index if we have one
+        if di is None and subject_zpid:
+            di = by_zpid.get(str(subject_zpid).strip())
+
+        if isinstance(di, dict):
+            subject_thumbnail_url = _thumbnail_url_from_detail_item(di)
     except Exception:
         subject_thumbnail_url = None
 
@@ -1737,4 +1784,14 @@ if __name__ == "__main__":
     year = int(float(input("Year Built: ").strip()))
     prop_type = input("Property Type (sf / mf / c / th): ").strip().lower()
 
+    subject = {
+        "address": address,
+        "beds": beds,
+        "baths": baths,
+        "sqft": sqft,
+        "year_built": year,
+        "property_type": prop_type,
+    }
+
     out = run_pipeline(address, beds, baths, sqft, year, prop_type, subject)
+    print(json.dumps(out, indent=2))
