@@ -1,4 +1,4 @@
-import os
+import os 
 import sys
 import json
 import uuid
@@ -233,6 +233,32 @@ def process_job(job_id: str, payload: dict):
         if not result or not isinstance(result, dict):
             job["status"] = "failed"
             job["error"] = "No comps returned."
+            save_job(job_id, job)
+            return
+
+        # ----------------------------
+        # CHANGE: Handle NOT_ENOUGH_USABLE_COMPS as a terminal "complete" result
+        # ----------------------------
+        result_code = result.get("result_code") or result.get("error_code") or result.get("result")
+        if isinstance(result_code, str) and result_code.strip().upper() == "NOT_ENOUGH_USABLE_COMPS":
+            rehab_raw = result.get("rehab", {}) or {}
+            rehab = int(float(rehab_raw.get("estimate_numeric", 0) or 0))
+
+            job["status"] = "complete"
+            job["result"] = {
+                "result_code": "NOT_ENOUGH_USABLE_COMPS",
+                "error_code": "NOT_ENOUGH_USABLE_COMPS",
+                "result": "NOT_ENOUGH_USABLE_COMPS",
+                "arv": None,
+                "arv_str": "—",
+                "estimated_rehab": rehab,
+                "estimated_rehab_str": (f"${rehab:,.0f}" if rehab else "$0"),
+                "max_offer": None,
+                "max_offer_str": "—",
+                "comps": [],
+            }
+            job["error"] = None
+            job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
             return
 
