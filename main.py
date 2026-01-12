@@ -1,4 +1,4 @@
-import os 
+import os
 import sys
 import json
 import uuid
@@ -243,6 +243,43 @@ def process_job(job_id: str, payload: dict):
             save_job(job_id, job)
             return
 
+        # ----------------------------
+        # SUBJECT THUMBNAIL (same concept as comps thumbnails)
+        # ----------------------------
+        subject_thumb = None
+        try:
+            # Prefer a thumbnail returned in subject container, if pipeline/orchestrator provides it
+            subj_from_result = result.get("subject")
+            if isinstance(subj_from_result, dict):
+                subject_thumb = (
+                    subj_from_result.get("thumbnail_url")
+                    or subj_from_result.get("subject_thumbnail_url")
+                    or subj_from_result.get("thumbnail")
+                    or subj_from_result.get("thumb")
+                )
+
+            # Fallback: top-level keys
+            if not subject_thumb:
+                subject_thumb = (
+                    result.get("subject_thumbnail_url")
+                    or result.get("thumbnail_url")
+                    or result.get("thumb")
+                )
+
+            # Fallback: nested pipeline keys (common if you return full pipeline output)
+            if not subject_thumb:
+                pipe = result.get("pipeline")
+                if isinstance(pipe, dict):
+                    subject_thumb = (
+                        pipe.get("subject_thumbnail_url")
+                        or pipe.get("thumbnail_url")
+                        or pipe.get("thumb")
+                    )
+        except Exception:
+            subject_thumb = None
+
+        subject_thumb = upgrade_zillow_thumbnail_url(subject_thumb)
+
         # ------------------------------------------------------------------
         # CHANGE: Graceful completion when ARV cannot be computed due to comps
         # ------------------------------------------------------------------
@@ -267,6 +304,7 @@ def process_job(job_id: str, payload: dict):
                 "max_offer": None,
                 "max_offer_str": "",
                 "comps": [],
+                "subject_thumbnail_url": subject_thumb,
             }
             job["error"] = None
             job["updated_at"] = datetime.utcnow().isoformat()
@@ -353,6 +391,7 @@ def process_job(job_id: str, payload: dict):
             "max_offer": mao,
             "max_offer_str": f"${mao:,.0f}",
             "comps": normalized_comps,
+            "subject_thumbnail_url": subject_thumb,
         }
         job["error"] = None
 

@@ -12,8 +12,12 @@ import json
 # ✅ Do NOT hardcode secrets in code (GitHub blocks pushes)
 # These must be set in your environment (or Render later)
 
-MAPBOX_TOKEN = os.environ.get("MAPBOX_TOKEN", "").strip()
-APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+def _get_mapbox_token() -> str:
+    return (os.environ.get("MAPBOX_TOKEN", "") or "").strip()
+
+def _get_apify_token() -> str:
+    return (os.environ.get("APIFY_TOKEN", "") or "").strip()
+
 
 ZILLOW_BASE_URL = "https://www.zillow.com/homes/recently_sold/"
 APIFY_ACTOR_URL = "https://api.apify.com/v2/acts/api-empire~zillow-search-scraper/runs"
@@ -28,14 +32,15 @@ LOCKED_ZOOM = 16
 # GEO
 # -------------------------------
 def geocode_address(address: str):
-    if not MAPBOX_TOKEN:
+    mapbox_token = _get_mapbox_token()
+    if not mapbox_token:
         raise RuntimeError("MAPBOX_TOKEN is not set in environment variables")
 
     url = (
         f"https://api.mapbox.com/geocoding/v5/mapbox.places/"
         f"{urllib.parse.quote(address)}.json"
     )
-    r = requests.get(url, params={"access_token": MAPBOX_TOKEN, "limit": 1}, timeout=10)
+    r = requests.get(url, params={"access_token": mapbox_token, "limit": 1}, timeout=10)
     r.raise_for_status()
     data = r.json()
     if not data.get("features"):
@@ -176,10 +181,14 @@ def generate_zillow_url_from_subject(subject, sold_months: int = 6):
 # APIFY RUNNER
 # -------------------------------
 def run_apify_scraper(zillow_url: str):
+    apify_token = _get_apify_token()
+    if not apify_token:
+        raise RuntimeError("APIFY_TOKEN is not set in environment variables")
+
     payload = {"searchUrls": [{"url": zillow_url}]}
     r = requests.post(
         APIFY_ACTOR_URL,
-        params={"token": APIFY_TOKEN},
+        params={"token": apify_token},
         json=payload,
         timeout=30,
     )
@@ -211,4 +220,3 @@ if __name__ == "__main__":
 
     print("\nStarting Apify scrape...")
     run_apify_scraper(zillow_url)
-

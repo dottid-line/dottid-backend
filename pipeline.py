@@ -782,6 +782,80 @@ def build_detail_index(detail_items: list[dict]):
 
 
 # ============================================================
+# SUBJECT thumbnail helper (match comps thumbnail behavior)
+# ============================================================
+def _norm_addr_key(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    t = s.strip().lower()
+    t = re.sub(r"\s+", " ", t)
+    t = t.replace(",", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _extract_house_number(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    m = re.match(r"^\s*(\d+)", s.strip())
+    return m.group(1) if m else ""
+
+
+def _find_subject_candidate_in_comps(subject_address: str, comps_all: list[dict]) -> dict | None:
+    """
+    Finds a likely subject property hit from the search-scrape results.
+    This avoids adding a new Apify run by reusing comps search results.
+    """
+    subj_key = _norm_addr_key(subject_address)
+    subj_num = _extract_house_number(subject_address)
+
+    best = None
+    best_score = -1
+
+    for c in comps_all or []:
+        if not isinstance(c, dict):
+            continue
+        raw = c.get("raw") or {}
+
+        addr = c.get("address") or raw.get("address") or ""
+        addr_key = _norm_addr_key(str(addr))
+
+        # Must at least share the same leading house number if we have one
+        if subj_num and _extract_house_number(str(addr)) != subj_num:
+            continue
+
+        score = 0
+        if addr_key == subj_key and addr_key:
+            score += 100  # exact match
+        else:
+            # Partial match heuristic
+            if subj_key and addr_key and subj_key in addr_key:
+                score += 40
+            if subj_num:
+                score += 10
+
+        detail_url = raw.get("detailUrl") or raw.get("detail_url") or raw.get("url") or c.get("url")
+        if not (isinstance(detail_url, str) and detail_url.startswith("http")):
+            continue
+
+        if score > best_score:
+            best_score = score
+            best = c
+
+    return best
+
+
+def _thumbnail_url_from_detail_item(detail_item: dict) -> str | None:
+    if not isinstance(detail_item, dict):
+        return None
+    urls = extract_photo_urls(detail_item)
+    if not urls:
+        urls = find_photo_urls_anywhere(detail_item)
+    urls = [u for u in urls if isinstance(u, str) and "photos.zillowstatic.com/fp/" in u.lower()]
+    return urls[0] if urls else None
+
+
+# ============================================================
 # Downloader
 # ============================================================
 def _get_download_pool() -> ThreadPoolExecutor:
@@ -1292,6 +1366,21 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
     print(f"\nTotal comps collected (after dedupe/top-up): {len(comps_all)}\n")
 
+    # -----------------------------------------------
+    # SUBJECT THUMBNAIL: try to find subject listing from search results
+    # (reuses existing search scrape results; no new Apify run)
+    # -----------------------------------------------
+    subject_detail_url = None
+    try:
+        subj_candidate = _find_subject_candidate_in_comps(address, comps_all)
+        if isinstance(subj_candidate, dict):
+            raw_sc = subj_candidate.get("raw") or {}
+            subject_detail_url = raw_sc.get("detailUrl") or raw_sc.get("detail_url") or raw_sc.get("url") or subj_candidate.get("url")
+            if isinstance(subject_detail_url, str):
+                subject_detail_url = _norm_url(subject_detail_url)
+    except Exception:
+        subject_detail_url = None
+
     # ===============================================
     # STEP 4 — SIMILARITY RANKING
     # ===============================================
@@ -1378,6 +1467,27 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         if isinstance(detail_url, str) and detail_url.startswith("http"):
             detail_urls.append({"url": detail_url})
 
+    # Include subject detail url (if found) so we can extract subject thumbnail using same detail actor
+    if isinstance(subject_detail_url, str) and subject_detail_url.startswith("http"):
+        detail_urls.append({"url": subject_detail_url})
+
+    # Dedupe startUrls
+    try:
+        seen_urls = set()
+        deduped = []
+        for x in detail_urls:
+            u = x.get("url")
+            if not isinstance(u, str):
+                continue
+            un = _norm_url(u)
+            if not un or un in seen_urls:
+                continue
+            seen_urls.add(un)
+            deduped.append({"url": un})
+        detail_urls = deduped
+    except Exception:
+        pass
+
     detail_items = []
     if detail_urls:
         detail_payload = {"startUrls": detail_urls}
@@ -1386,6 +1496,16 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         detail_items = []
 
     by_zpid, by_url = build_detail_index(detail_items)
+
+    # Extract subject thumbnail_url (same logic as comps: first fp photo URL)
+    subject_thumbnail_url = None
+    try:
+        if isinstance(subject_detail_url, str) and subject_detail_url:
+            di = by_url.get(_norm_url(subject_detail_url))
+            if isinstance(di, dict):
+                subject_thumbnail_url = _thumbnail_url_from_detail_item(di)
+    except Exception:
+        subject_thumbnail_url = None
 
     for comp in ranked:
         raw = comp.get("raw") or {}
@@ -1518,6 +1638,8 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         "countable_comps_toward_target": countable_sim_ge,
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "outlier_debug": outlier_dbg,
+        "subject_thumbnail_url": subject_thumbnail_url,
+        "subject_detail_url": subject_detail_url,
     }
 
 
