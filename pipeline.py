@@ -856,6 +856,72 @@ def _thumbnail_url_from_detail_item(detail_item: dict) -> str | None:
 
 
 # ============================================================
+# Option B subject lookup: search-scrape the SUBJECT address to get its zpid/detailUrl
+# ============================================================
+def _build_subject_lookup_url(address: str) -> str:
+    # Zillow supports /homes/<address>_rb/ patterns; this is the simplest robust build.
+    a = (address or "").strip()
+    a = re.sub(r"\s+", " ", a)
+    a = a.replace("#", " ")
+    a = a.replace("/", " ")
+    a = re.sub(r"\s+", " ", a).strip()
+    slug = a.replace(",", "")
+    slug = re.sub(r"\s+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return f"https://www.zillow.com/homes/{slug}_rb/"
+
+
+def _pick_best_subject_from_search_items(subject_address: str, items: list[dict]) -> dict | None:
+    subj_key = _norm_addr_key(subject_address)
+    subj_num = _extract_house_number(subject_address)
+
+    best = None
+    best_score = -1
+
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+
+        raw_addr = it.get("address") or ""
+        try:
+            hdp = it.get("hdpData") or {}
+            home = hdp.get("homeInfo") or {}
+            if not raw_addr:
+                raw_addr = home.get("streetAddress") or home.get("address") or ""
+        except Exception:
+            pass
+
+        addr_key = _norm_addr_key(str(raw_addr))
+        if subj_num and _extract_house_number(str(raw_addr)) != subj_num:
+            continue
+
+        score = 0
+        if addr_key and addr_key == subj_key:
+            score += 100
+        else:
+            if subj_key and addr_key and subj_key in addr_key:
+                score += 40
+            if subj_num:
+                score += 10
+
+        zpid = it.get("zpid") or it.get("id") or it.get("zillowId") or it.get("zillow_id")
+        if zpid is not None:
+            score += 5
+
+        detail_url = it.get("detailUrl") or it.get("detail_url") or it.get("url") or it.get("listingUrl") or it.get("zillowUrl")
+        if not (isinstance(detail_url, str) and detail_url.startswith("http")):
+            # still allow if zpid exists (we can build url)
+            if zpid is None:
+                continue
+
+        if score > best_score:
+            best_score = score
+            best = it
+
+    return best
+
+
+# ============================================================
 # Downloader
 # ============================================================
 def _get_download_pool() -> ThreadPoolExecutor:
@@ -1371,7 +1437,8 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     # Priority:
     #   1) subject["subject_zillow_url"] / ["subjectZillowUrl"]
     #   2) subject["subject_zpid"] / ["subjectZpid"] -> build url
-    #   3) fallback heuristic from comps search results (existing behavior)
+    #   3) subject lookup via SEARCH_ACTOR on /homes/<address>_rb/ (Option B)
+    #   4) fallback heuristic from comps search results (existing behavior)
     # -----------------------------------------------
     subject_detail_url = None
     subject_zpid = None
@@ -1395,6 +1462,28 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     except Exception:
         subject_detail_url = None
         subject_zpid = None
+
+    if not subject_zpid and not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
+        try:
+            subj_lookup_url = _build_subject_lookup_url(address)
+            subj_items = _run_search_scrape(apify_session, subj_lookup_url) or []
+            picked = _pick_best_subject_from_search_items(address, subj_items)
+            if isinstance(picked, dict):
+                subject_zpid = picked.get("zpid") or picked.get("id") or picked.get("zillowId") or picked.get("zillow_id")
+                if subject_zpid is not None:
+                    subject_zpid = str(subject_zpid).strip()
+
+                subject_detail_url = (
+                    picked.get("detailUrl")
+                    or picked.get("detail_url")
+                    or picked.get("url")
+                    or picked.get("listingUrl")
+                    or picked.get("zillowUrl")
+                )
+                if isinstance(subject_detail_url, str):
+                    subject_detail_url = _norm_url(subject_detail_url)
+        except Exception:
+            pass
 
     if not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
         built = _build_zillow_url_from_zpid(subject_zpid) if subject_zpid else None
