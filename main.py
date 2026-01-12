@@ -248,8 +248,13 @@ def process_job(job_id: str, payload: dict):
         # ------------------------------------------------------------------
         arv_status = str(arv_obj.get("status") or "").lower().strip()
         arv_msg = str(arv_obj.get("message") or "").upper().strip()
+        arv_value_direct = arv_obj.get("arv", None)
 
-        if arv_status == "fail" and arv_msg == "NOT_ENOUGH_USABLE_COMPS":
+        if (
+            "NOT_ENOUGH_USABLE_COMPS" in arv_msg
+            or (arv_value_direct is None and "NOT_ENOUGH" in arv_msg)
+            or (arv_value_direct is None and arv_status in ["fail", "failed"])
+        ):
             rehab_raw = result.get("rehab", {})
             rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
 
