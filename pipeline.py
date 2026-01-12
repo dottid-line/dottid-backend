@@ -70,8 +70,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-GLOBAL_DOWNLOAD_WORKERS = _env_int("DOWNLOAD_WORKERS", 64)
-GLOBAL_MAX_INFLIGHT = _env_int("MAX_INFLIGHT", 16)
+GLOBAL_DOWNLOAD_WORKERS = _env_int("DOWNLOAD_WORKERS", 8)
+GLOBAL_MAX_INFLIGHT = _env_int("MAX_INFLIGHT", 4)
 IMG_MAX_RETRIES = _env_int("IMG_MAX_RETRIES", 4)
 
 GLOBAL_DOWNLOAD_WORKERS = max(8, min(GLOBAL_DOWNLOAD_WORKERS, 256))
@@ -1616,3 +1616,4 @@ if __name__ == "__main__":
     prop_type = input("Property Type (sf / mf / c / th): ").strip().lower()
 
     out = run_pipeline(address, beds, baths, sqft, year, prop_type, subject)
+
