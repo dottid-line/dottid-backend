@@ -1616,4 +1616,3 @@ if __name__ == "__main__":
     prop_type = input("Property Type (sf / mf / c / th): ").strip().lower()
 
     out = run_pipeline(address, beds, baths, sqft, year, prop_type, subject)
-
