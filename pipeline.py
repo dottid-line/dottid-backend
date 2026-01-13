@@ -782,146 +782,6 @@ def build_detail_index(detail_items: list[dict]):
 
 
 # ============================================================
-# SUBJECT thumbnail helper (match comps thumbnail behavior)
-# ============================================================
-def _norm_addr_key(s: str) -> str:
-    if not isinstance(s, str):
-        return ""
-    t = s.strip().lower()
-    t = re.sub(r"\s+", " ", t)
-    t = t.replace(",", " ")
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-
-def _extract_house_number(s: str) -> str:
-    if not isinstance(s, str):
-        return ""
-    m = re.match(r"^\s*(\d+)", s.strip())
-    return m.group(1) if m else ""
-
-
-def _find_subject_candidate_in_comps(subject_address: str, comps_all: list[dict]) -> dict | None:
-    """
-    Finds a likely subject property hit from the search-scrape results.
-    This avoids adding a new Apify run by reusing comps search results.
-    """
-    subj_key = _norm_addr_key(subject_address)
-    subj_num = _extract_house_number(subject_address)
-
-    best = None
-    best_score = -1
-
-    for c in comps_all or []:
-        if not isinstance(c, dict):
-            continue
-        raw = c.get("raw") or {}
-
-        addr = c.get("address") or raw.get("address") or ""
-        addr_key = _norm_addr_key(str(addr))
-
-        # Must at least share the same leading house number if we have one
-        if subj_num and _extract_house_number(str(addr)) != subj_num:
-            continue
-
-        score = 0
-        if addr_key == subj_key and addr_key:
-            score += 100  # exact match
-        else:
-            # Partial match heuristic
-            if subj_key and addr_key and subj_key in addr_key:
-                score += 40
-            if subj_num:
-                score += 10
-
-        detail_url = raw.get("detailUrl") or raw.get("detail_url") or raw.get("url") or c.get("url")
-        if not (isinstance(detail_url, str) and detail_url.startswith("http")):
-            continue
-
-        if score > best_score:
-            best_score = score
-            best = c
-
-    return best
-
-
-def _thumbnail_url_from_detail_item(detail_item: dict) -> str | None:
-    if not isinstance(detail_item, dict):
-        return None
-    urls = extract_photo_urls(detail_item)
-    if not urls:
-        urls = find_photo_urls_anywhere(detail_item)
-    urls = [u for u in urls if isinstance(u, str) and "photos.zillowstatic.com/fp/" in u.lower()]
-    return urls[0] if urls else None
-
-
-# ============================================================
-# Option B subject lookup: search-scrape the SUBJECT address to get its zpid/detailUrl
-# ============================================================
-def _build_subject_lookup_url(address: str) -> str:
-    # Zillow supports /homes/<address>_rb/ patterns; this is the simplest robust build.
-    a = (address or "").strip()
-    a = re.sub(r"\s+", " ", a)
-    a = a.replace("#", " ")
-    a = a.replace("/", " ")
-    a = re.sub(r"\s+", " ", a).strip()
-    slug = a.replace(",", "")
-    slug = re.sub(r"\s+", "-", slug)
-    slug = re.sub(r"-+", "-", slug).strip("-")
-    return f"https://www.zillow.com/homes/{slug}_rb/"
-
-
-def _pick_best_subject_from_search_items(subject_address: str, items: list[dict]) -> dict | None:
-    subj_key = _norm_addr_key(subject_address)
-    subj_num = _extract_house_number(subject_address)
-
-    best = None
-    best_score = -1
-
-    for it in items or []:
-        if not isinstance(it, dict):
-            continue
-
-        raw_addr = it.get("address") or ""
-        try:
-            hdp = it.get("hdpData") or {}
-            home = hdp.get("homeInfo") or {}
-            if not raw_addr:
-                raw_addr = home.get("streetAddress") or home.get("address") or ""
-        except Exception:
-            pass
-
-        addr_key = _norm_addr_key(str(raw_addr))
-        if subj_num and _extract_house_number(str(raw_addr)) != subj_num:
-            continue
-
-        score = 0
-        if addr_key and addr_key == subj_key:
-            score += 100
-        else:
-            if subj_key and addr_key and subj_key in addr_key:
-                score += 40
-            if subj_num:
-                score += 10
-
-        zpid = it.get("zpid") or it.get("id") or it.get("zillowId") or it.get("zillow_id")
-        if zpid is not None:
-            score += 5
-
-        detail_url = it.get("detailUrl") or it.get("detail_url") or it.get("url") or it.get("listingUrl") or it.get("zillowUrl")
-        if not (isinstance(detail_url, str) and detail_url.startswith("http")):
-            # still allow if zpid exists (we can build url)
-            if zpid is None:
-                continue
-
-        if score > best_score:
-            best_score = score
-            best = it
-
-    return best
-
-
-# ============================================================
 # Downloader
 # ============================================================
 def _get_download_pool() -> ThreadPoolExecutor:
@@ -1432,75 +1292,6 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
     print(f"\nTotal comps collected (after dedupe/top-up): {len(comps_all)}\n")
 
-    # -----------------------------------------------
-    # SUBJECT THUMBNAIL: choose a reliable subject detail URL
-    # Priority:
-    #   1) subject["subject_zillow_url"] / ["subjectZillowUrl"]
-    #   2) subject["subject_zpid"] / ["subjectZpid"] -> build url
-    #   3) subject lookup via SEARCH_ACTOR on /homes/<address>_rb/ (Option B)
-    #   4) fallback heuristic from comps search results (existing behavior)
-    # -----------------------------------------------
-    subject_detail_url = None
-    subject_zpid = None
-    try:
-        subject_detail_url = (
-            subject.get("subject_zillow_url")
-            or subject.get("subjectZillowUrl")
-            or subject.get("zillow_url")
-            or subject.get("zillowUrl")
-        )
-        if isinstance(subject_detail_url, str):
-            subject_detail_url = _norm_url(subject_detail_url)
-
-        subject_zpid = (
-            subject.get("subject_zpid")
-            or subject.get("subjectZpid")
-            or subject.get("zpid")
-        )
-        if subject_zpid is not None:
-            subject_zpid = str(subject_zpid).strip()
-    except Exception:
-        subject_detail_url = None
-        subject_zpid = None
-
-    if not subject_zpid and not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
-        try:
-            subj_lookup_url = _build_subject_lookup_url(address)
-            subj_items = _run_search_scrape(apify_session, subj_lookup_url) or []
-            picked = _pick_best_subject_from_search_items(address, subj_items)
-            if isinstance(picked, dict):
-                subject_zpid = picked.get("zpid") or picked.get("id") or picked.get("zillowId") or picked.get("zillow_id")
-                if subject_zpid is not None:
-                    subject_zpid = str(subject_zpid).strip()
-
-                subject_detail_url = (
-                    picked.get("detailUrl")
-                    or picked.get("detail_url")
-                    or picked.get("url")
-                    or picked.get("listingUrl")
-                    or picked.get("zillowUrl")
-                )
-                if isinstance(subject_detail_url, str):
-                    subject_detail_url = _norm_url(subject_detail_url)
-        except Exception:
-            pass
-
-    if not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
-        built = _build_zillow_url_from_zpid(subject_zpid) if subject_zpid else None
-        if isinstance(built, str) and built.startswith("http"):
-            subject_detail_url = built
-
-    if not (isinstance(subject_detail_url, str) and subject_detail_url.startswith("http")):
-        try:
-            subj_candidate = _find_subject_candidate_in_comps(address, comps_all)
-            if isinstance(subj_candidate, dict):
-                raw_sc = subj_candidate.get("raw") or {}
-                subject_detail_url = raw_sc.get("detailUrl") or raw_sc.get("detail_url") or raw_sc.get("url") or subj_candidate.get("url")
-                if isinstance(subject_detail_url, str):
-                    subject_detail_url = _norm_url(subject_detail_url)
-        except Exception:
-            subject_detail_url = None
-
     # ===============================================
     # STEP 4 — SIMILARITY RANKING
     # ===============================================
@@ -1587,27 +1378,6 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         if isinstance(detail_url, str) and detail_url.startswith("http"):
             detail_urls.append({"url": detail_url})
 
-    # Include subject detail url (if found) so we can extract subject thumbnail using same detail actor
-    if isinstance(subject_detail_url, str) and subject_detail_url.startswith("http"):
-        detail_urls.append({"url": subject_detail_url})
-
-    # Dedupe startUrls
-    try:
-        seen_urls = set()
-        deduped = []
-        for x in detail_urls:
-            u = x.get("url")
-            if not isinstance(u, str):
-                continue
-            un = _norm_url(u)
-            if not un or un in seen_urls:
-                continue
-            seen_urls.add(un)
-            deduped.append({"url": un})
-        detail_urls = deduped
-    except Exception:
-        pass
-
     detail_items = []
     if detail_urls:
         detail_payload = {"startUrls": detail_urls}
@@ -1616,32 +1386,6 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         detail_items = []
 
     by_zpid, by_url = build_detail_index(detail_items)
-
-    # Extract subject thumbnail_url (same logic as comps: first fp photo URL)
-    subject_thumbnail_url = None
-    try:
-        di = None
-
-        # First try URL key (normalized)
-        if isinstance(subject_detail_url, str) and subject_detail_url:
-            key = _norm_url(subject_detail_url)
-            di = by_url.get(key)
-
-            # Fallback: try adding/removing trailing slash
-            if di is None:
-                if key.endswith("/"):
-                    di = by_url.get(key[:-1])
-                else:
-                    di = by_url.get(key + "/")
-
-        # Fallback: try zpid index if we have one
-        if di is None and subject_zpid:
-            di = by_zpid.get(str(subject_zpid).strip())
-
-        if isinstance(di, dict):
-            subject_thumbnail_url = _thumbnail_url_from_detail_item(di)
-    except Exception:
-        subject_thumbnail_url = None
 
     for comp in ranked:
         raw = comp.get("raw") or {}
@@ -1774,8 +1518,6 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         "countable_comps_toward_target": countable_sim_ge,
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "outlier_debug": outlier_dbg,
-        "subject_thumbnail_url": subject_thumbnail_url,
-        "subject_detail_url": subject_detail_url,
     }
 
 
@@ -1873,14 +1615,5 @@ if __name__ == "__main__":
     year = int(float(input("Year Built: ").strip()))
     prop_type = input("Property Type (sf / mf / c / th): ").strip().lower()
 
-    subject = {
-        "address": address,
-        "beds": beds,
-        "baths": baths,
-        "sqft": sqft,
-        "year_built": year,
-        "property_type": prop_type,
-    }
-
     out = run_pipeline(address, beds, baths, sqft, year, prop_type, subject)
-    print(json.dumps(out, indent=2))
+
