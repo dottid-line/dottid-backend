@@ -275,10 +275,11 @@ def compute_arv(subject: Dict[str, Any], comps: List[Dict[str, Any]], total_comp
         }
 
     # CHANGE: apply condition-score thresholds that depend on the scenario
-    # - 2-comp scenario: each comp must have condition_score >= 1.5
-    # - 3-comp scenario (top-3 eligibility): comp must have condition_score >= 1.7
+    # NOTE: lower condition_score is "better" (more updated). Thresholds are MAX allowed.
+    # - 2-comp scenario: each comp must have condition_score <= 1.5
+    # - 3-comp scenario (top-3 eligibility): comp must have condition_score <= 1.7
     if len(usable) == 2:
-        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) >= 1.5)]
+        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) <= 1.5)]
         if len(usable) < 2:
             return {
                 "status": "fail",
@@ -287,7 +288,7 @@ def compute_arv(subject: Dict[str, Any], comps: List[Dict[str, Any]], total_comp
                 "selected_comps": [],
             }
     else:
-        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) >= 1.7)]
+        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) <= 1.7)]
         if len(usable) < 2:
             return {
                 "status": "fail",
