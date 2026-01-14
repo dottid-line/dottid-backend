@@ -1,0 +1,11 @@
+{
+  "run_timestamp": "2026-01-13_16-05-15",
+  "total_properties": 100,
+  "priced_properties_count": 68,
+  "model_not_enough_comps_count": 15,
+  "within_5_pct_count": 24,
+  "within_10_pct_count": 42,
+  "within_5_pct_rate": 0.35294117647058826,
+  "within_10_pct_rate": 0.6176470588235294,
+  "decision_agreement_rate": 0.4838709677419355
+}

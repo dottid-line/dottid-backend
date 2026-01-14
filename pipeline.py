@@ -1188,14 +1188,30 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     print(f"Total comps after 6mo(+12mo if run) dedupe: {len(comps_all)}")
 
     # CHANGE: No relaxed 12-month search. 12 months is the max window.
-    # CHANGE: If <2 total comps after 6mo(+12mo if run), stop with NOT_ENOUGH_USABLE_COMPS.
+    # CHANGE: If <2 total comps after 6mo(+12mo if run), print ARV RESULT fail and return ARV-style failure payload.
     if len(comps_all) < 2:
         print("Not enough comps returned after 6-month + (12-month if triggered). Pipeline stopping.\n")
-        return {
+
+        arv_out = {
             "status": "fail",
             "message": "NOT_ENOUGH_USABLE_COMPS",
+            "arv": None,
+            "selected_comps": [],
+        }
+        print("STEP 8: ARV compute (top-3 selection + final ARV)\n")
+        print(f"ARV RESULT: {arv_out.get('status')} | {arv_out.get('message')}")
+        print("")
+
+        return {
+            "status": "ok",
             "ranked": [],
-            "arv": None
+            "scored": [],
+            "arv": arv_out,
+            "total_comps_collected": len(comps_all),
+            "detail_items_count": 0,
+            "countable_comps_toward_target": 0,
+            "similarity_threshold": SIMILARITY_THRESHOLD,
+            "outlier_debug": {},
         }
 
     print(f"\nTotal comps collected (after dedupe/top-up): {len(comps_all)}\n")
