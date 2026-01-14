@@ -274,12 +274,17 @@ def compute_arv(subject: Dict[str, Any], comps: List[Dict[str, Any]], total_comp
             "selected_comps": [],
         }
 
-    # CHANGE: apply condition-score thresholds that depend on the scenario
+    # CHANGE: multifamily uses a looser MAX condition threshold (<= 2.0) for both 2-comp and 3-comp scenarios.
     # NOTE: lower condition_score is "better" (more updated). Thresholds are MAX allowed.
-    # - 2-comp scenario: each comp must have condition_score <= 1.5
-    # - 3-comp scenario (top-3 eligibility): comp must have condition_score <= 1.7
+    subj_type = _safe_str(subject.get("property_type")).lower()
+    is_mf = subj_type in {"mf", "multi", "multifamily", "multi_family"}
+
+    max_cond_2 = 2.0 if is_mf else 1.5
+    max_cond_3 = 2.0 if is_mf else 1.7
+
+    # CHANGE: apply condition-score thresholds that depend on the scenario
     if len(usable) == 2:
-        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) <= 1.5)]
+        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) <= max_cond_2)]
         if len(usable) < 2:
             return {
                 "status": "fail",
@@ -288,7 +293,7 @@ def compute_arv(subject: Dict[str, Any], comps: List[Dict[str, Any]], total_comp
                 "selected_comps": [],
             }
     else:
-        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) <= 1.7)]
+        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) <= max_cond_3)]
         if len(usable) < 2:
             return {
                 "status": "fail",
