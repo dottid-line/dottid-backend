@@ -276,7 +276,8 @@ def compute_arv(subject: Dict[str, Any], comps: List[Dict[str, Any]], total_comp
 
     # CHANGE: multifamily uses a looser MAX condition threshold (<= 2.0) for both 2-comp and 3-comp scenarios.
     # NOTE: lower condition_score is "better" (more updated). Thresholds are MAX allowed.
-    subj_type = _safe_str(subject.get("property_type")).lower()
+    subj_type = _safe_str(_get_any(subject, ["property_type", "propertyType"])).lower()
+    subj_type = subj_type.replace("-", "_").replace(" ", "_")
     is_mf = subj_type in {"mf", "multi", "multifamily", "multi_family"}
 
     max_cond_2 = 2.0 if is_mf else 1.5
