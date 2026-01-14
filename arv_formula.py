@@ -274,8 +274,61 @@ def compute_arv(subject: Dict[str, Any], comps: List[Dict[str, Any]], total_comp
             "selected_comps": [],
         }
 
+    # CHANGE: apply condition-score thresholds that depend on the scenario
+    # - 2-comp scenario: each comp must have condition_score >= 1.5
+    # - 3-comp scenario (top-3 eligibility): comp must have condition_score >= 1.7
+    if len(usable) == 2:
+        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) >= 1.5)]
+        if len(usable) < 2:
+            return {
+                "status": "fail",
+                "message": "NOT_ENOUGH_USABLE_COMPS",
+                "arv": None,
+                "selected_comps": [],
+            }
+    else:
+        usable = [c for c in usable if (_condition_value(c) is not None and float(_condition_value(c)) >= 1.7)]
+        if len(usable) < 2:
+            return {
+                "status": "fail",
+                "message": "NOT_ENOUGH_USABLE_COMPS",
+                "arv": None,
+                "selected_comps": [],
+            }
+
     usable_sorted = sorted(usable, key=lambda c: (_num(c.get("distance_miles"), 9e9),))
+
+    # CHANGE: select up to 3 comps from the post-threshold usable pool
     selected = usable_sorted[:3]
+
+    # CHANGE: if exactly 2 comps are used, reject if sold_price spread is > 20%
+    if len(selected) == 2:
+        p1 = _num(selected[0].get("sold_price"), None)
+        p2 = _num(selected[1].get("sold_price"), None)
+        if p1 is None or p2 is None or p1 <= 0 or p2 <= 0:
+            return {
+                "status": "fail",
+                "message": "NOT_ENOUGH_USABLE_COMPS",
+                "arv": None,
+                "selected_comps": [],
+            }
+        hi = max(p1, p2)
+        lo = min(p1, p2)
+        if lo <= 0:
+            return {
+                "status": "fail",
+                "message": "NOT_ENOUGH_USABLE_COMPS",
+                "arv": None,
+                "selected_comps": [],
+            }
+        spread_pct = (hi - lo) / lo
+        if spread_pct > 0.20:
+            return {
+                "status": "fail",
+                "message": "NOT_ENOUGH_USABLE_COMPS",
+                "arv": None,
+                "selected_comps": [],
+            }
 
     estimates = []
     weights = []

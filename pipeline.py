@@ -51,7 +51,6 @@ FILL_PRIORITY_MAX_SQFT_DIFF = 150
 
 # Trigger 12-month top-up ONLY if 6-month comps < 12
 TRIGGER_12MO_IF_6MO_LESS_THAN = 12
-MIN_COMPS_AFTER_12MO_BEFORE_RELAX = 6
 
 MAX_IMAGES_TO_DOWNLOAD = 70
 MIN_REQUIRED_IMAGES = 3  # HARD GUARD: if < this, do not score condition (skip as insufficient images)
@@ -565,84 +564,6 @@ def _generate_zillow_url_with_months(generate_zillow_url_fn, address, beds, bath
     except Exception:
         url_default = generate_zillow_url_fn(address, beds, baths, sqft, year, prop_type)
         return _make_12_month_url(url_default) if months == 12 else url_default
-
-
-def _decode_search_query_state(zillow_url: str) -> dict | None:
-    try:
-        parsed = urllib.parse.urlparse(zillow_url)
-        q = urllib.parse.parse_qs(parsed.query)
-        s = q.get("searchQueryState", [None])[0]
-        if not s:
-            return None
-        decoded = urllib.parse.unquote(s)
-        return json.loads(decoded)
-    except Exception:
-        return None
-
-
-def _encode_search_query_state(base_url: str, state: dict) -> str:
-    parsed = urllib.parse.urlparse(base_url)
-    q = urllib.parse.parse_qs(parsed.query)
-    s = json.dumps(state, separators=(",", ":"))
-    q["searchQueryState"] = [urllib.parse.quote(s)]
-
-    # FIX: skip any list values to avoid TypeError when joining
-    pairs: list[str] = []
-    for k, v in q.items():
-        if not v:
-            continue
-        first_val = v[0]
-        if isinstance(first_val, list):
-            # Drop list-valued query params in relaxed mode
-            continue
-        pairs.append(f"{k}={first_val}")
-
-    new_query = "&".join(pairs)
-    return urllib.parse.urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
-    )
-
-
-def _build_relaxed_12mo_url(zillow_url_12: str, subject_year: int, subject_sqft: int) -> str:
-    state = _decode_search_query_state(zillow_url_12)
-    if not isinstance(state, dict):
-        return zillow_url_12
-    fs = state.get("filterState")
-    if not isinstance(fs, dict):
-        return zillow_url_12
-
-    doz = fs.get("doz")
-    if isinstance(doz, dict) and "value" in doz:
-        fs["doz"]["value"] = "12m"
-
-    fs["built"] = {"min": int(subject_year - 25), "max": int(subject_year + 15)}
-
-    if isinstance(fs.get("beds"), dict):
-        try:
-            bmin = fs["beds"].get("min")
-            bmax = fs["beds"].get("max")
-            if bmin is not None:
-                fs["beds"]["min"] = max(0, int(bmin) - 1)
-            if bmax is not None:
-                fs["beds"]["max"] = int(bmax) + 1
-        except Exception:
-            pass
-
-    if isinstance(fs.get("baths"), dict):
-        try:
-            bn = fs["baths"].get("min")
-            bx = fs["baths"].get("max")
-            if bn is not None:
-                fs["baths"]["min"] = max(0, float(bn) - 1.0)
-            if bx is not None:
-                fs["baths"]["max"] = float(bx) + 1.0
-        except Exception:
-            pass
-
-    fs["sqft"] = {"min": max(0, int(subject_sqft * 0.75)), "max": int(subject_sqft * 1.25)}
-
-    state["filterState"] = fs
-    return _encode_search_query_state(zillow_url_12, state)
 
 
 # ============================================================
@@ -1266,26 +1187,13 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     comps_all = _dedupe_comps(comps_all)
     print(f"Total comps after 6mo(+12mo if run) dedupe: {len(comps_all)}")
 
-    # RELAXED SEARCH PASS
-    if ran_12mo and len(comps_all) < MIN_COMPS_AFTER_12MO_BEFORE_RELAX and zillow_url_12:
-        print(f"\nSTEP 3B: Relaxed 12-month search triggered (comps after 12mo={len(comps_all)} < {MIN_COMPS_AFTER_12MO_BEFORE_RELAX})\n")
-
-        relaxed_url = _build_relaxed_12mo_url(zillow_url_12, int(year), int(sqft))
-        print(relaxed_url)
-
-        comps_relaxed = _run_search_scrape(apify_session, relaxed_url) or []
-        print(f"Relaxed 12-month comps returned: {len(comps_relaxed)}")
-
-        comps_all.extend(comps_relaxed)
-        comps_all = _dedupe_comps(comps_all)
-
-        print(f"Total comps after relaxed dedupe: {len(comps_all)}")
-
-    if not comps_all:
-        print("No comps returned after 6-month + (12-month if triggered) + (relaxed if triggered). Pipeline stopping.\n")
+    # CHANGE: No relaxed 12-month search. 12 months is the max window.
+    # CHANGE: If <2 total comps after 6mo(+12mo if run), stop with NOT_ENOUGH_USABLE_COMPS.
+    if len(comps_all) < 2:
+        print("Not enough comps returned after 6-month + (12-month if triggered). Pipeline stopping.\n")
         return {
             "status": "fail",
-            "message": "NO_COMPS_AFTER_ALL_SEARCHES",
+            "message": "NOT_ENOUGH_USABLE_COMPS",
             "ranked": [],
             "arv": None
         }
@@ -1365,7 +1273,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     if not ranked:
         print(f"Final comps kept: 0 (threshold={SIMILARITY_THRESHOLD}, target={MAX_COMPS_TO_SCORE})")
         print("No comps available to proceed. Pipeline stopping before detail/download.\n")
-        return {"status": "fail", "message": "NO_COMPS_AFTER_RANKING", "ranked": [], "arv": None}
+        return {"status": "fail", "message": "NOT_ENOUGH_USABLE_COMPS", "ranked": [], "arv": None}
 
     print(f"Comps with sim>=0.35 in countable pool: {countable_sim_ge}")
     print(f"Total comps selected for scoring/print: {len(ranked)}/{MAX_COMPS_TO_SCORE}")
@@ -1616,4 +1524,3 @@ if __name__ == "__main__":
     prop_type = input("Property Type (sf / mf / c / th): ").strip().lower()
 
     out = run_pipeline(address, beds, baths, sqft, year, prop_type, subject)
-

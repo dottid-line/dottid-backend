@@ -1,4 +1,4 @@
-import os 
+import os
 import sys
 import json
 import uuid
@@ -230,16 +230,58 @@ def process_job(job_id: str, payload: dict):
 
         result = run_full_underwrite(subject)
 
+        # ------------------------------------------------------------------
+        # CHANGE: if underwriting returns nothing/invalid, treat as NOT_ENOUGH_USABLE_COMPS
+        # (prevents blank/failed ARV outcome when searches return 0 comps)
+        # ------------------------------------------------------------------
         if not result or not isinstance(result, dict):
-            job["status"] = "failed"
-            job["error"] = "No comps returned."
+            rehab_raw = {}
+            rehab = 45000
+            try:
+                rehab_raw = (result or {}).get("rehab", {}) if isinstance(result, dict) else {}
+                rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
+            except Exception:
+                rehab = 45000
+
+            job["status"] = "complete"
+            job["result"] = {
+                "arv": "NOT_ENOUGH_USABLE_COMPS",
+                "arv_str": "NOT_ENOUGH_USABLE_COMPS",
+                "estimated_rehab": rehab,
+                "estimated_rehab_str": f"${rehab:,.0f}",
+                "max_offer": None,
+                "max_offer_str": "",
+                "comps": [],
+            }
+            job["error"] = None
+            job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
             return
 
         arv_obj = result.get("arv")
+
+        # ------------------------------------------------------------------
+        # CHANGE: if ARV object missing/invalid, treat as NOT_ENOUGH_USABLE_COMPS
+        # ------------------------------------------------------------------
         if not isinstance(arv_obj, dict):
-            job["status"] = "failed"
-            job["error"] = "Invalid ARV object."
+            rehab_raw = result.get("rehab", {}) if isinstance(result, dict) else {}
+            try:
+                rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
+            except Exception:
+                rehab = 45000
+
+            job["status"] = "complete"
+            job["result"] = {
+                "arv": "NOT_ENOUGH_USABLE_COMPS",
+                "arv_str": "NOT_ENOUGH_USABLE_COMPS",
+                "estimated_rehab": rehab,
+                "estimated_rehab_str": f"${rehab:,.0f}",
+                "max_offer": None,
+                "max_offer_str": "",
+                "comps": [],
+            }
+            job["error"] = None
+            job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
             return
 
@@ -252,6 +294,7 @@ def process_job(job_id: str, payload: dict):
 
         if (
             "NOT_ENOUGH_USABLE_COMPS" in arv_msg
+            or "NOT_ENOUGH_COMPS" in arv_msg
             or (arv_value_direct is None and "NOT_ENOUGH" in arv_msg)
             or (arv_value_direct is None and arv_status in ["fail", "failed"])
         ):
