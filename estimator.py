@@ -235,130 +235,143 @@ def estimate_rehab(subject, image_results):
     )
     subject_condition_label = WEB_CONDITION_TO_TIER.get(subject_condition_key, "needsrehab")
 
-    # Majority condition from strong images, fallback to subject condition label
-    kitchen_final = _majority_condition(
-        kitchen_imgs,
-        default_label=subject_condition_label,
-        min_room_conf=MIN_CONF,
-        min_cond_conf=MIN_CONF
-    )
-    bath_final = _majority_condition(
-        bath_imgs,
-        default_label=subject_condition_label,
-        min_room_conf=MIN_CONF,
-        min_cond_conf=MIN_CONF
-    )
-
     # ------------------------------------------------------------------
-    # NO-IMAGE CASE: USER CONDITION FALLBACK (never infer fullrehab)
+    # ✅ NEW RULE: if there is NO kitchen image at all, do NOT compute off images.
+    #             Fall back to the user-selected condition only.
     # ------------------------------------------------------------------
     property_tier = None  # "fullyupdated" | "solidcondition" | "needsrehab" | "fullrehab"
-
-    if total_imgs == 0:
+    if len(kitchen_imgs) == 0:
         property_tier = subject_condition_label
+        kitchen_final = subject_condition_label
+        bath_final = subject_condition_label
 
-    # ------------------------------------------------------------------
-    # IMAGE-BASED CLASSIFICATION
-    # ------------------------------------------------------------------
-    if property_tier is None:
-        # FULL GUT TRIGGERS
-        # Rule 1: kitchen full + 3 other full
-        fullgut_k_plus3 = has_k_full and (others_full_count >= 3)
-
-        # Rule 2: >= 40% of non-kitchen strong images fullrehab, with minimum depth
-        full_percent = (
-            (others_full_count / float(total_other_strong))
-            if total_other_strong >= MIN_IMAGES_FOR_PERCENT
-            else 0.0
+        # keep counters consistent for return payload
+        total_other_strong = 0
+        others_full_count = 0
+        others_needs_count = 0
+    else:
+        # Majority condition from strong images, fallback to subject condition label
+        kitchen_final = _majority_condition(
+            kitchen_imgs,
+            default_label=subject_condition_label,
+            min_room_conf=MIN_CONF,
+            min_cond_conf=MIN_CONF
         )
-        fullgut_percent = full_percent >= 0.40
+        bath_final = _majority_condition(
+            bath_imgs,
+            default_label=subject_condition_label,
+            min_room_conf=MIN_CONF,
+            min_cond_conf=MIN_CONF
+        )
 
-        # Rule 3: kitchen full & bath needs → full rehab (no further checks)
-        k_full_b_needs = kitchen_final == "fullrehab" and bath_final == "needsrehab"
+        # ------------------------------------------------------------------
+        # NO-IMAGE CASE: USER CONDITION FALLBACK (never infer fullrehab)
+        # ------------------------------------------------------------------
+        if total_imgs == 0:
+            property_tier = subject_condition_label
 
-        if fullgut_k_plus3 or fullgut_percent or k_full_b_needs:
-            property_tier = "fullrehab"
+        # ------------------------------------------------------------------
+        # IMAGE-BASED CLASSIFICATION
+        # ------------------------------------------------------------------
+        if property_tier is None:
+            # FULL GUT TRIGGERS
+            # Rule 1: kitchen full + 3 other full
+            fullgut_k_plus3 = has_k_full and (others_full_count >= 3)
 
-    if property_tier is None:
-        # MEDIUM REHAB TRIGGER:
-        # - Full Gut didn't fire
-        # - kitchen OR bath needs
-        # - 3+ other needsrehab images
-        medium_trigger = (has_k_needs or has_b_needs) and (others_needs_count >= 3)
-        if medium_trigger:
-            property_tier = "needsrehab"
+            # Rule 2: >= 40% of non-kitchen strong images fullrehab, with minimum depth
+            full_percent = (
+                (others_full_count / float(total_other_strong))
+                if total_other_strong >= MIN_IMAGES_FOR_PERCENT
+                else 0.0
+            )
+            fullgut_percent = full_percent >= 0.40
 
-    # ------------------------------------------------------------------
-    # CONFLICT RULES (only if still not classified)
-    # ------------------------------------------------------------------
-    has_other_imgs = len(strong_others) > 0
+            # Rule 3: kitchen full & bath needs → full rehab (no further checks)
+            k_full_b_needs = kitchen_final == "fullrehab" and bath_final == "needsrehab"
 
-    if property_tier is None:
-        # 1) Kitchen solid + bathroom needs rehab
-        if kitchen_final == "solidcondition" and bath_final == "needsrehab":
-            if has_other_imgs:
-                # If none of the other images are needs/full, treat as solid
-                if others_needs_count == 0 and len(others_full) == 0:
-                    property_tier = "solidcondition"
-                else:
-                    # Some other rooms show issues → treat as needs rehab
-                    property_tier = "needsrehab"
-            else:
-                # Only kitchen/bath images → be safe
-                property_tier = "needsrehab"
-
-    if property_tier is None:
-        # 2) Kitchen solid + bathroom full rehab → minimum needs rehab
-        if kitchen_final == "solidcondition" and bath_final == "fullrehab":
-            property_tier = "needsrehab"
-
-    if property_tier is None:
-        # 3) Kitchen needs rehab + bathroom fully updated
-        if kitchen_final == "needsrehab" and bath_final == "fullyupdated":
-            if has_other_imgs:
-                if others_needs_count >= 3:
-                    property_tier = "needsrehab"
-                else:
-                    # Light issues evidenced → treat as solid
-                    property_tier = "solidcondition"
-            else:
-                # Only kitchen/bath images → be safe
-                property_tier = "needsrehab"
-
-    if property_tier is None:
-        # 4) Kitchen full rehab + bathroom needs rehab → full rehab
-        if kitchen_final == "fullrehab" and bath_final == "needsrehab":
-            property_tier = "fullrehab"
-
-    # ------------------------------------------------------------------
-    # IF STILL UNCLASSIFIED → GENERAL FALLBACK USING K/B + FULLY UPDATED RULE
-    # ------------------------------------------------------------------
-    if property_tier is None:
-        # Any kitchen/bath fullrehab forces at least needsrehab
-        if kitchen_final == "fullrehab" or bath_final == "fullrehab":
-            # If both fullrehab, treat as full gut; otherwise medium as floor.
-            if kitchen_final == "fullrehab" and bath_final == "fullrehab":
+            if fullgut_k_plus3 or fullgut_percent or k_full_b_needs:
                 property_tier = "fullrehab"
-            else:
+
+        if property_tier is None:
+            # MEDIUM REHAB TRIGGER:
+            # - Full Gut didn't fire
+            # - kitchen OR bath needs
+            # - 3+ other needsrehab images
+            medium_trigger = (has_k_needs or has_b_needs) and (others_needs_count >= 3)
+            if medium_trigger:
                 property_tier = "needsrehab"
-        else:
-            # Fully updated rule: K + B updated + >10 images + ≥80% fullyupdated
-            if (
-                kitchen_final == "fullyupdated"
-                and bath_final == "fullyupdated"
-                and total_imgs > 10
-                and fully_ratio_all >= 0.80
-            ):
-                property_tier = "fullyupdated"
-            else:
-                # If K & B at least solid, treat as solid; otherwise needs.
-                if kitchen_final in ("solidcondition", "fullyupdated") and bath_final in (
-                    "solidcondition",
-                    "fullyupdated",
-                ):
-                    property_tier = "solidcondition"
+
+        # ------------------------------------------------------------------
+        # CONFLICT RULES (only if still not classified)
+        # ------------------------------------------------------------------
+        has_other_imgs = len(strong_others) > 0
+
+        if property_tier is None:
+            # 1) Kitchen solid + bathroom needs rehab
+            if kitchen_final == "solidcondition" and bath_final == "needsrehab":
+                if has_other_imgs:
+                    # If none of the other images are needs/full, treat as solid
+                    if others_needs_count == 0 and len(others_full) == 0:
+                        property_tier = "solidcondition"
+                    else:
+                        # Some other rooms show issues → treat as needs rehab
+                        property_tier = "needsrehab"
+                else:
+                    # Only kitchen/bath images → be safe
+                    property_tier = "needsrehab"
+
+        if property_tier is None:
+            # 2) Kitchen solid + bathroom full rehab → minimum needs rehab
+            if kitchen_final == "solidcondition" and bath_final == "fullrehab":
+                property_tier = "needsrehab"
+
+        if property_tier is None:
+            # 3) Kitchen needs rehab + bathroom fully updated
+            if kitchen_final == "needsrehab" and bath_final == "fullyupdated":
+                if has_other_imgs:
+                    if others_needs_count >= 3:
+                        property_tier = "needsrehab"
+                    else:
+                        # Light issues evidenced → treat as solid
+                        property_tier = "solidcondition"
+                else:
+                    # Only kitchen/bath images → be safe
+                    property_tier = "needsrehab"
+
+        if property_tier is None:
+            # 4) Kitchen full rehab + bathroom needs rehab → full rehab
+            if kitchen_final == "fullrehab" and bath_final == "needsrehab":
+                property_tier = "fullrehab"
+
+        # ------------------------------------------------------------------
+        # IF STILL UNCLASSIFIED → GENERAL FALLBACK USING K/B + FULLY UPDATED RULE
+        # ------------------------------------------------------------------
+        if property_tier is None:
+            # Any kitchen/bath fullrehab forces at least needsrehab
+            if kitchen_final == "fullrehab" or bath_final == "fullrehab":
+                # If both fullrehab, treat as full gut; otherwise medium as floor.
+                if kitchen_final == "fullrehab" and bath_final == "fullrehab":
+                    property_tier = "fullrehab"
                 else:
                     property_tier = "needsrehab"
+            else:
+                # Fully updated rule: K + B updated + >10 images + ≥80% fullyupdated
+                if (
+                    kitchen_final == "fullyupdated"
+                    and bath_final == "fullyupdated"
+                    and total_imgs > 10
+                    and fully_ratio_all >= 0.80
+                ):
+                    property_tier = "fullyupdated"
+                else:
+                    # If K & B at least solid, treat as solid; otherwise needs.
+                    if kitchen_final in ("solidcondition", "fullyupdated") and bath_final in (
+                        "solidcondition",
+                        "fullyupdated",
+                    ):
+                        property_tier = "solidcondition"
+                    else:
+                        property_tier = "needsrehab"
 
     # ------------------------------------------------------------------
     # COST MAPS
@@ -409,6 +422,7 @@ def estimate_rehab(subject, image_results):
 
     # ------------------------------------------------------------------
     # ✅ OVERRIDE: Fully Updated + >6 VALIDATED INTERIOR IMAGES + ≥80% fullyupdated
+    #            + must include at least 1 kitchen image
     #            + no roof/hvac/foundation -> show "<$10,000" and numeric 10000
     # ------------------------------------------------------------------
     INTERIOR_ROOM_TYPES = {
@@ -432,6 +446,7 @@ def estimate_rehab(subject, image_results):
         if (r.get("room_type") in INTERIOR_ROOM_TYPES)
     ]
     interior_count = len(interior_valid)
+    interior_has_kitchen = any(r.get("room_type") == "kitchen" for r in interior_valid)
 
     if interior_count > 0:
         interior_fully = sum(1 for r in interior_valid if r.get("condition") == "fullyupdated")
@@ -441,7 +456,8 @@ def estimate_rehab(subject, image_results):
 
     if (
         subject_condition_label == "fullyupdated"
-        and interior_count > 6
+        and interior_count > 9
+        and interior_has_kitchen
         and interior_fully_ratio >= 0.80
         and roof_cost == 0
         and hvac_cost == 0
