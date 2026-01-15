@@ -233,7 +233,6 @@ def estimate_rehab(subject, image_results):
         if subject_condition_raw is not None
         else ""
     )
-    subject_condition_key = subject_condition_key.replace("-", "_").replace(" ", "_")
     subject_condition_label = WEB_CONDITION_TO_TIER.get(subject_condition_key, "needsrehab")
 
     # Majority condition from strong images, fallback to subject condition label
@@ -407,6 +406,61 @@ def estimate_rehab(subject, image_results):
     else:
         # fullrehab or anything else
         base_mult = 15
+
+    # ------------------------------------------------------------------
+    # ✅ OVERRIDE: Fully Updated + >6 VALIDATED INTERIOR IMAGES + ≥80% fullyupdated
+    #            + no roof/hvac/foundation -> show "<$10,000" and numeric 10000
+    # ------------------------------------------------------------------
+    INTERIOR_ROOM_TYPES = {
+        "kitchen",
+        "bathroom",
+        "bedroom",
+        "living_room",
+        "dining_room",
+        "family_room",
+        "basement",
+        "attic",
+        "hallway",
+        "laundry",
+        "office",
+        "den",
+        "bonus_room",
+    }
+
+    interior_valid = [
+        r for r in image_results
+        if (r.get("room_type") in INTERIOR_ROOM_TYPES)
+    ]
+    interior_count = len(interior_valid)
+
+    if interior_count > 0:
+        interior_fully = sum(1 for r in interior_valid if r.get("condition") == "fullyupdated")
+        interior_fully_ratio = interior_fully / float(interior_count)
+    else:
+        interior_fully_ratio = 0.0
+
+    if (
+        subject_condition_label == "fullyupdated"
+        and interior_count > 6
+        and interior_fully_ratio >= 0.80
+        and roof_cost == 0
+        and hvac_cost == 0
+        and foundation_cost == 0
+    ):
+        property_tier = "fullyupdated"
+        base_mult = 5
+
+        # Force fully-updated presentation for this special case
+        kitchen_final = "fullyupdated"
+        bath_final = "fullyupdated"
+        kitchen_cost = 0
+        bath_cost = 0
+
+        estimate = 10000
+        estimate_str = "<$10,000"
+
+        # Keep sqft_cost consistent with the displayed estimate in this case
+        sqft_cost = 10000
 
     return {
         "tier": base_mult,

@@ -196,6 +196,10 @@ def _build_subject(parsed: dict) -> dict:
         "deal_type": parsed.get("deal_type") or parsed.get("dealType", ""),
         "assignment_fee": parsed.get("assignment_fee") or parsed.get("assignmentFee", ""),
         "units": parsed.get("units", ""),
+
+        # ✅ FIX: pass through user-selected condition so estimator can use it
+        "condition": parsed.get("condition", ""),
+
         "kitchen_updated": parsed.get("kitchen", ""),
         "bath_updated": parsed.get("bath", ""),
         "roof": parsed.get("roof", ""),
