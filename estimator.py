@@ -233,6 +233,7 @@ def estimate_rehab(subject, image_results):
         if subject_condition_raw is not None
         else ""
     )
+    subject_condition_key = subject_condition_key.replace("-", "_").replace(" ", "_")
     subject_condition_label = WEB_CONDITION_TO_TIER.get(subject_condition_key, "needsrehab")
 
     # Majority condition from strong images, fallback to subject condition label
