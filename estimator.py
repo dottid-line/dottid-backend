@@ -92,33 +92,6 @@ def estimate_rehab(subject, image_results):
         except Exception:
             return default
 
-    def _parse_age_bucket(s):
-        """
-        Accepts:
-          - numeric years (e.g. '12', 12)
-          - Shopify buckets: '1-3 years', '4-7 years', '8-19 years', '20+ years'
-        Returns an int years.
-        """
-        if s is None:
-            return None
-        if isinstance(s, (int, float)):
-            return int(round(float(s)))
-        t = str(s).lower().strip()
-        if "1-3" in t:
-            return 2
-        if "4-7" in t:
-            return 6
-        if "8-19" in t:
-            return 12
-        if "20+" in t or "20 +" in t:
-            return 25
-        # try to extract a number
-        import re
-        m = re.search(r"(\d+(\.\d+)?)", t)
-        if m:
-            return int(round(float(m.group(1))))
-        return None
-
     def _parse_yes_no(v):
         if v is None:
             return None
@@ -150,18 +123,6 @@ def estimate_rehab(subject, image_results):
     if sqft is None:
         sqft = subject.get("sqftNum", None)
     sqft = _to_float(sqft, 0.0)
-
-    # kitchen/bath age: prefer numeric backend keys, fallback to Shopify bucket strings
-    kitchen_age = subject.get("kitchen_age", None)
-    bath_age = subject.get("bath_age", None)
-
-    if kitchen_age is None:
-        kitchen_age = _parse_age_bucket(subject.get("kitchen"))
-    if bath_age is None:
-        bath_age = _parse_age_bucket(subject.get("bath"))
-
-    kitchen_age = _to_float(kitchen_age, 50.0)
-    bath_age = _to_float(bath_age, 50.0)
 
     # roof/hvac: prefer backend booleans, fallback to Shopify Yes/No strings
     roof_needed = subject.get("roof_needed", None)
@@ -257,54 +218,44 @@ def estimate_rehab(subject, image_results):
         fully_ratio_all = 0.0
 
     # ------------------------------------------------------------------
-    # KITCHEN / BATH FINAL CONDITIONS (image-majority, else age-based)
+    # KITCHEN / BATH FINAL CONDITIONS (image-majority, else user-condition-based)
     # ------------------------------------------------------------------
-    # Age-based fallback labels (used if no strong images for that room)
-    if kitchen_age <= 3:
-        kitchen_age_label = "fullyupdated"
-    elif 4 <= kitchen_age <= 7:
-        kitchen_age_label = "solidcondition"
-    elif 8 <= kitchen_age <= 19:
-        kitchen_age_label = "needsrehab"
-    else:
-        kitchen_age_label = "fullrehab"
+    WEB_CONDITION_TO_TIER = {
+        "fully_updated": "fullyupdated",
+        "solid_condition": "solidcondition",
+        "needs_rehab": "needsrehab",
+        "full_rehab": "fullrehab",
+    }
 
-    if bath_age <= 3:
-        bath_age_label = "fullyupdated"
-    elif 4 <= bath_age <= 7:
-        bath_age_label = "solidcondition"
-    elif 8 <= bath_age <= 19:
-        bath_age_label = "needsrehab"
-    else:
-        bath_age_label = "fullrehab"
+    subject_condition_raw = subject.get("condition", None)
+    subject_condition_key = (
+        str(subject_condition_raw).strip().lower()
+        if subject_condition_raw is not None
+        else ""
+    )
+    subject_condition_label = WEB_CONDITION_TO_TIER.get(subject_condition_key, "needsrehab")
 
-    # Majority condition from strong images, fallback to age-based label
+    # Majority condition from strong images, fallback to subject condition label
     kitchen_final = _majority_condition(
-        kitchen_imgs, default_label=kitchen_age_label, min_room_conf=MIN_CONF, min_cond_conf=MIN_CONF
+        kitchen_imgs,
+        default_label=subject_condition_label,
+        min_room_conf=MIN_CONF,
+        min_cond_conf=MIN_CONF
     )
     bath_final = _majority_condition(
-        bath_imgs, default_label=bath_age_label, min_room_conf=MIN_CONF, min_cond_conf=MIN_CONF
+        bath_imgs,
+        default_label=subject_condition_label,
+        min_room_conf=MIN_CONF,
+        min_cond_conf=MIN_CONF
     )
 
     # ------------------------------------------------------------------
-    # NO-IMAGE CASE: AGE-ONLY CLASSIFICATION
+    # NO-IMAGE CASE: USER CONDITION FALLBACK (never infer fullrehab)
     # ------------------------------------------------------------------
     property_tier = None  # "fullyupdated" | "solidcondition" | "needsrehab" | "fullrehab"
 
     if total_imgs == 0:
-        # Pure age fallback:
-        # - both fullyupdated -> fullyupdated
-        # - any fullrehab -> fullrehab
-        # - any needsrehab -> needsrehab
-        # - else -> solidcondition
-        if kitchen_final == "fullyupdated" and bath_final == "fullyupdated":
-            property_tier = "fullyupdated"
-        elif kitchen_final == "fullrehab" or bath_final == "fullrehab":
-            property_tier = "fullrehab"
-        elif kitchen_final == "needsrehab" or bath_final == "needsrehab":
-            property_tier = "needsrehab"
-        else:
-            property_tier = "solidcondition"
+        property_tier = subject_condition_label
 
     # ------------------------------------------------------------------
     # IMAGE-BASED CLASSIFICATION
