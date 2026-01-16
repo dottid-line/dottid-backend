@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import re
+import time
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,6 +94,105 @@ def load_job(job_id: str) -> Optional[dict]:
         raw = redis_client.get(f"job:{job_id}")
         return json.loads(raw) if raw else None
     return _inmem_jobs.get(job_id)
+
+# ------------------------------------------------------------------
+# CACHE SETTINGS (OPTIONAL; DISK-BASED)
+# ------------------------------------------------------------------
+def _env_bool(name: str, default: str = "false") -> bool:
+    v = (os.environ.get(name, default) or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+CACHE_ENABLED = _env_bool("CACHE_ENABLED", "false")
+CACHE_DIR = (os.environ.get("CACHE_DIR", "/tmp/dottid_cache") or "/tmp/dottid_cache").strip()
+try:
+    CACHE_TTL_SECONDS = int((os.environ.get("CACHE_TTL_SECONDS", "43200") or "43200").strip())  # default 12 hours
+except Exception:
+    CACHE_TTL_SECONDS = 43200
+
+def _ensure_cache_dirs():
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.join(CACHE_DIR, "comp_images"), exist_ok=True)
+        os.makedirs(os.path.join(CACHE_DIR, "meta"), exist_ok=True)
+        os.makedirs(os.path.join(CACHE_DIR, "locks"), exist_ok=True)
+    except Exception:
+        pass
+
+def _cleanup_comp_image_cache(ttl_seconds: int) -> int:
+    """
+    Deletes expired cached comp images (Option B cache), based on per-item metadata.
+    Safe to call even if nothing is cached yet.
+
+    Returns: number of cache entries removed
+    """
+    removed = 0
+    try:
+        meta_dir = os.path.join(CACHE_DIR, "meta")
+        img_dir = os.path.join(CACHE_DIR, "comp_images")
+        if not os.path.isdir(meta_dir):
+            return 0
+
+        now = time.time()
+
+        for name in os.listdir(meta_dir):
+            if not name.lower().endswith(".json"):
+                continue
+
+            meta_path = os.path.join(meta_dir, name)
+            try:
+                raw = open(meta_path, "r", encoding="utf-8").read()
+                meta = json.loads(raw) if raw else {}
+            except Exception:
+                meta = {}
+
+            downloaded_at = None
+            try:
+                downloaded_at = float(meta.get("downloaded_at")) if meta.get("downloaded_at") is not None else None
+            except Exception:
+                downloaded_at = None
+
+            per_item_ttl = None
+            try:
+                per_item_ttl = int(meta.get("ttl_seconds")) if meta.get("ttl_seconds") is not None else None
+            except Exception:
+                per_item_ttl = None
+
+            if downloaded_at is None:
+                # Fallback: use metadata file mtime
+                try:
+                    downloaded_at = os.path.getmtime(meta_path)
+                except Exception:
+                    downloaded_at = now
+
+            effective_ttl = per_item_ttl if (per_item_ttl is not None and per_item_ttl > 0) else ttl_seconds
+            expired = (now - downloaded_at) > float(effective_ttl)
+
+            if not expired:
+                continue
+
+            key = name.rsplit(".", 1)[0]
+            # Delete image(s) by prefix match (extension may vary)
+            try:
+                for img_name in os.listdir(img_dir):
+                    if img_name.startswith(key + ".") or img_name == key:
+                        try:
+                            os.remove(os.path.join(img_dir, img_name))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            try:
+                os.remove(meta_path)
+            except Exception:
+                pass
+
+            removed += 1
+
+    except Exception:
+        return removed
+
+    return removed
 
 # ------------------------------------------------------------------
 # WORKER POOL (BACKGROUND ONLY)
@@ -230,7 +330,18 @@ def process_job(job_id: str, payload: dict):
     job["updated_at"] = datetime.utcnow().isoformat()
     save_job(job_id, job)
 
+    t_job_start = time.perf_counter()
+
     try:
+        if CACHE_ENABLED:
+            _ensure_cache_dirs()
+            try:
+                removed = _cleanup_comp_image_cache(CACHE_TTL_SECONDS)
+                if removed:
+                    log(f"Cache cleanup: removed_expired_comp_images={removed} ttl_seconds={CACHE_TTL_SECONDS}")
+            except Exception:
+                pass
+
         subject = payload.get("subject", {}) or {}
         image_blobs = payload.get("image_blobs", []) or []
 
@@ -239,16 +350,22 @@ def process_job(job_id: str, payload: dict):
         log(f"Input deal_type='{subject.get('deal_type','')}' assignment_fee='{subject.get('assignment_fee','')}' condition='{subject.get('condition','')}' units='{subject.get('units','')}'")
         log(f"Images received (raw upload count) = {len(image_blobs)}")
 
+        t_save_start = time.perf_counter()
         img_info = _save_uploaded_images_to_temp(image_blobs)
+        t_save_end = time.perf_counter()
 
         subject["uploaded_image_paths"] = img_info.get("files", [])
         subject["uploaded_image_temp_dir"] = img_info.get("temp_dir")
 
         log(f"Saved images to temp. temp_dir='{subject.get('uploaded_image_temp_dir')}' valid_saved_files={len(subject.get('uploaded_image_paths') or [])}")
+        log(f"TIMING saved_upload_images_seconds={(t_save_end - t_save_start):.3f}")
 
         log("Calling run_full_underwrite(subject)...")
+        t_underwrite_start = time.perf_counter()
         result = run_full_underwrite(subject)
+        t_underwrite_end = time.perf_counter()
         log("Returned from run_full_underwrite(subject).")
+        log(f"TIMING run_full_underwrite_seconds={(t_underwrite_end - t_underwrite_start):.3f}")
 
         # ------------------------------------------------------------------
         # CHANGE: if underwriting returns nothing/invalid, treat as NOT_ENOUGH_USABLE_COMPS
@@ -283,6 +400,8 @@ def process_job(job_id: str, payload: dict):
                 log(json.dumps(job["result"], indent=2))
             except Exception:
                 log(str(job["result"]))
+
+            log(f"TIMING total_job_seconds={(time.perf_counter() - t_job_start):.3f}")
             return
 
         arv_obj = result.get("arv")
@@ -322,6 +441,8 @@ def process_job(job_id: str, payload: dict):
                 log(json.dumps(job["result"], indent=2))
             except Exception:
                 log(str(job["result"]))
+
+            log(f"TIMING total_job_seconds={(time.perf_counter() - t_job_start):.3f}")
             return
 
         # ------------------------------------------------------------------
@@ -361,6 +482,8 @@ def process_job(job_id: str, payload: dict):
                 log(json.dumps(job["result"], indent=2))
             except Exception:
                 log(str(job["result"]))
+
+            log(f"TIMING total_job_seconds={(time.perf_counter() - t_job_start):.3f}")
             return
 
         arv = int(_extract_arv_value(arv_obj))
@@ -474,6 +597,11 @@ def process_job(job_id: str, payload: dict):
 
     job["updated_at"] = datetime.utcnow().isoformat()
     save_job(job_id, job)
+
+    try:
+        log(f"TIMING total_job_seconds={(time.perf_counter() - t_job_start):.3f}")
+    except Exception:
+        pass
 
 # ------------------------------------------------------------------
 # ENDPOINTS

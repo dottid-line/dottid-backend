@@ -13,6 +13,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any
 import base64
+import hashlib
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -92,6 +93,154 @@ _dl_lock = threading.Lock()
 _dl_status = Counter()
 _dl_ctypes = Counter()
 _DOWNLOAD_POOL: ThreadPoolExecutor | None = None
+
+# ============================================================
+# DISK CACHE (OPTION B: comp image bytes by URL; TTL-based)
+# ============================================================
+def _env_bool(name: str, default: str = "false") -> bool:
+    v = (os.environ.get(name, default) or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+CACHE_ENABLED = _env_bool("CACHE_ENABLED", "false")
+CACHE_DIR = (os.environ.get("CACHE_DIR", "/tmp/dottid_cache") or "/tmp/dottid_cache").strip()
+try:
+    CACHE_TTL_SECONDS = int((os.environ.get("CACHE_TTL_SECONDS", "43200") or "43200").strip())  # default 12 hours
+except Exception:
+    CACHE_TTL_SECONDS = 43200
+
+
+def _cache_paths_for_url(url: str) -> tuple[str, str, str]:
+    h = hashlib.sha256(url.encode("utf-8", errors="ignore")).hexdigest()
+    img_dir = os.path.join(CACHE_DIR, "comp_images")
+    meta_dir = os.path.join(CACHE_DIR, "meta")
+    lock_dir = os.path.join(CACHE_DIR, "locks")
+    return (
+        os.path.join(img_dir, f"{h}.bin"),
+        os.path.join(meta_dir, f"{h}.json"),
+        os.path.join(lock_dir, f"{h}.lock"),
+    )
+
+
+def _ensure_cache_dirs():
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.join(CACHE_DIR, "comp_images"), exist_ok=True)
+        os.makedirs(os.path.join(CACHE_DIR, "meta"), exist_ok=True)
+        os.makedirs(os.path.join(CACHE_DIR, "locks"), exist_ok=True)
+    except Exception:
+        pass
+
+
+def _is_cache_fresh(meta_path: str, ttl_seconds: int) -> bool:
+    try:
+        raw = open(meta_path, "r", encoding="utf-8").read()
+        meta = json.loads(raw) if raw else {}
+    except Exception:
+        meta = {}
+
+    downloaded_at = None
+    try:
+        downloaded_at = float(meta.get("downloaded_at")) if meta.get("downloaded_at") is not None else None
+    except Exception:
+        downloaded_at = None
+
+    per_item_ttl = None
+    try:
+        per_item_ttl = int(meta.get("ttl_seconds")) if meta.get("ttl_seconds") is not None else None
+    except Exception:
+        per_item_ttl = None
+
+    if downloaded_at is None:
+        try:
+            downloaded_at = os.path.getmtime(meta_path)
+        except Exception:
+            downloaded_at = time.time()
+
+    effective_ttl = per_item_ttl if (per_item_ttl is not None and per_item_ttl > 0) else ttl_seconds
+    return (time.time() - float(downloaded_at)) <= float(effective_ttl)
+
+
+def _read_cached_bytes(url: str) -> bytes | None:
+    if not CACHE_ENABLED:
+        return None
+    try:
+        _ensure_cache_dirs()
+        img_path, meta_path, _lock_path = _cache_paths_for_url(url)
+        if not os.path.exists(img_path) or not os.path.exists(meta_path):
+            return None
+        if not _is_cache_fresh(meta_path, CACHE_TTL_SECONDS):
+            return None
+        b = open(img_path, "rb").read()
+        return b if b else None
+    except Exception:
+        return None
+
+
+def _write_cached_bytes(url: str, b: bytes, ctype: str | None = None):
+    if not CACHE_ENABLED:
+        return
+    try:
+        _ensure_cache_dirs()
+        img_path, meta_path, lock_path = _cache_paths_for_url(url)
+
+        # Lightweight lock to avoid double-download stampede
+        lock_fd = None
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except Exception:
+            lock_fd = None
+
+        try:
+            # If another thread/process is writing, wait briefly and bail (next read will hit)
+            if lock_fd is None:
+                time.sleep(0.25)
+                return
+
+            tmp_img = img_path + ".tmp"
+            tmp_meta = meta_path + ".tmp"
+
+            with open(tmp_img, "wb") as f:
+                f.write(b)
+
+            meta = {
+                "original_url": url,
+                "downloaded_at": time.time(),
+                "ttl_seconds": int(CACHE_TTL_SECONDS),
+                "content_type": ctype,
+                "size_bytes": int(len(b) if b else 0),
+            }
+            with open(tmp_meta, "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+
+            try:
+                os.replace(tmp_img, img_path)
+            except Exception:
+                try:
+                    os.rename(tmp_img, img_path)
+                except Exception:
+                    pass
+
+            try:
+                os.replace(tmp_meta, meta_path)
+            except Exception:
+                try:
+                    os.rename(tmp_meta, meta_path)
+                except Exception:
+                    pass
+        finally:
+            try:
+                if lock_fd is not None:
+                    os.close(lock_fd)
+            except Exception:
+                pass
+            try:
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except Exception:
+                pass
+    except Exception:
+        return
 
 
 # ============================================================
@@ -780,11 +929,32 @@ def _fetch_and_decode(url: str) -> Image.Image | None:
     if not acquired:
         return None
     try:
+        # OPTION B CACHE: try cached bytes first
+        cached = _read_cached_bytes(url)
+        if cached:
+            try:
+                img = Image.open(BytesIO(cached))
+                try:
+                    img.draft("RGB", (256, 256))
+                except Exception:
+                    pass
+                return img.convert("RGB")
+            except Exception:
+                pass
+
         headers = {"Referer": "https://www.zillow.com/"}
         for u in _url_variants(url):
+            # If variant differs, cache is still keyed by original URL for stability
             b, _st, _ct = _fetch_bytes_with_retry(u, extra_headers=headers)
             if not b:
                 continue
+
+            # Write-through cache on successful fetch (keyed by original URL)
+            try:
+                _write_cached_bytes(url, b, ctype=_ct)
+            except Exception:
+                pass
+
             try:
                 img = Image.open(BytesIO(b))
                 try:
@@ -1155,16 +1325,30 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
     apify_session = create_apify_session()
 
+    t_total_start = time.perf_counter()
+
     # ===============================================
     # STEP 1 — ZILLOW URLS
     # ===============================================
     print("\nSTEP 1: Generate Zillow URL (6 months)\n")
+    t_step1_start = time.perf_counter()
     zillow_url_6 = generate_zillow_url_from_subject(subject, 6)
+    t_step1_end = time.perf_counter()
     print(zillow_url_6)
+    try:
+        print(f"TIMING step1_generate_url_seconds={(t_step1_end - t_step1_start):.3f}")
+    except Exception:
+        pass
 
     print("\nSTEP 2: Apify search scrape (6 months)\n")
+    t_search6_start = time.perf_counter()
     comps_6 = _run_search_scrape(apify_session, zillow_url_6) or []
+    t_search6_end = time.perf_counter()
     print(f"6-month comps returned: {len(comps_6)}")
+    try:
+        print(f"TIMING step2_apify_search_6mo_seconds={(t_search6_end - t_search6_start):.3f}")
+    except Exception:
+        pass
 
     comps_all = list(comps_6)
 
@@ -1176,16 +1360,34 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
         print(f"\nSTEP 3: 12-month top-up triggered (6mo comps={len(comps_6)} < {TRIGGER_12MO_IF_6MO_LESS_THAN})\n")
 
+        t_step3_url_start = time.perf_counter()
         zillow_url_12 = generate_zillow_url_from_subject(subject, 12)
+        t_step3_url_end = time.perf_counter()
         print(zillow_url_12)
+        try:
+            print(f"TIMING step3_generate_url_12mo_seconds={(t_step3_url_end - t_step3_url_start):.3f}")
+        except Exception:
+            pass
 
+        t_search12_start = time.perf_counter()
         comps_12 = _run_search_scrape(apify_session, zillow_url_12) or []
+        t_search12_end = time.perf_counter()
         print(f"12-month comps returned: {len(comps_12)}")
+        try:
+            print(f"TIMING step3_apify_search_12mo_seconds={(t_search12_end - t_search12_start):.3f}")
+        except Exception:
+            pass
 
         comps_all.extend(comps_12)
 
+    t_dedupe_start = time.perf_counter()
     comps_all = _dedupe_comps(comps_all)
+    t_dedupe_end = time.perf_counter()
     print(f"Total comps after 6mo(+12mo if run) dedupe: {len(comps_all)}")
+    try:
+        print(f"TIMING dedupe_comps_seconds={(t_dedupe_end - t_dedupe_start):.3f}")
+    except Exception:
+        pass
 
     # CHANGE: No relaxed 12-month search. 12 months is the max window.
     # CHANGE: If <2 total comps after 6mo(+12mo if run), print ARV RESULT fail and return ARV-style failure payload.
@@ -1201,6 +1403,11 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         print("STEP 8: ARV compute (top-3 selection + final ARV)\n")
         print(f"ARV RESULT: {arv_out.get('status')} | {arv_out.get('message')}")
         print("")
+
+        try:
+            print(f"TIMING total_run_pipeline_seconds={(time.perf_counter() - t_total_start):.3f}")
+        except Exception:
+            pass
 
         return {
             "status": "ok",
@@ -1221,6 +1428,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     # ===============================================
     print("\nSTEP 4: Similarity ranking\n")
 
+    t_rank_start = time.perf_counter()
     subject_for_ranker = {
         "address": address,
         "beds": beds,
@@ -1272,6 +1480,11 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         ceiling_ratio=OUTLIER_MEDIAN_CEIL_RATIO,
         min_comps_for_median=OUTLIER_MIN_COMPS_FOR_MEDIAN,
     )
+    t_rank_end = time.perf_counter()
+    try:
+        print(f"TIMING step4_rank_and_filter_seconds={(t_rank_end - t_rank_start):.3f}")
+    except Exception:
+        pass
 
     if outlier_dbg.get("outlier_filter_applied"):
         print(
@@ -1295,6 +1508,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     print(f"Total comps selected for scoring/print: {len(ranked)}/{MAX_COMPS_TO_SCORE}")
 
     print("\nSTEP 5: Detail scrape for all selected comps (single call)\n")
+    t_detail_start = time.perf_counter()
     detail_urls = []
     for comp in ranked:
         raw = comp.get("raw") or {}
@@ -1308,6 +1522,11 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         detail_items = apify_run_sync_get_dataset_items(apify_session, DETAIL_ACTOR_ID, detail_payload, timeout_sec=APIFY_TIMEOUT_SEC)
     if not isinstance(detail_items, list):
         detail_items = []
+    t_detail_end = time.perf_counter()
+    try:
+        print(f"TIMING step5_apify_detail_seconds={(t_detail_end - t_detail_start):.3f}")
+    except Exception:
+        pass
 
     by_zpid, by_url = build_detail_index(detail_items)
 
@@ -1338,9 +1557,15 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     _print_ranked_comps_table(ranked, "TOP COMPS CHOSEN (POST THRESHOLD + OUTLIER FILTER + BACKFILL)")
 
     print("\nLoading models once (warm-up).")
+    t_models_start = time.perf_counter()
     get_models, score_images = _load_condition_functions()
     get_models()
+    t_models_end = time.perf_counter()
     print("Models loaded.\n")
+    try:
+        print(f"TIMING load_models_seconds={(t_models_end - t_models_start):.3f}")
+    except Exception:
+        pass
 
     print("STEP 6: Download up to 70 images + condition score (parallel)\n")
     print(f"Downloader: workers={GLOBAL_DOWNLOAD_WORKERS}, inflight={GLOBAL_MAX_INFLIGHT}, retries={IMG_MAX_RETRIES}\n")
@@ -1368,12 +1593,16 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         urls = [u for u in urls if isinstance(u, str) and "photos.zillowstatic.com/fp/" in u.lower()]
 
         urls = urls[:MAX_IMAGES_TO_DOWNLOAD]
+
+        t_dl_start = time.perf_counter()
         pil_images, got = download_images_to_pil(urls, MAX_IMAGES_TO_DOWNLOAD)
+        t_dl_end = time.perf_counter()
 
         # Always log what we found/downloaded (helps diagnose “phantom photo” cases)
         comp["downloaded_images"] = got
         comp["photos_found_urls"] = len(urls)
         comp["photos_sample_urls"] = urls[:3]
+        comp["download_seconds"] = float(t_dl_end - t_dl_start)
 
         # HARD GUARD: no (or too few) images => do not score condition
         if got < MIN_REQUIRED_IMAGES:
@@ -1381,7 +1610,10 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
             return comp
 
         try:
+            t_score_start = time.perf_counter()
             result = score_images(pil_images)
+            t_score_end = time.perf_counter()
+            comp["score_seconds"] = float(t_score_end - t_score_start)
             if isinstance(result, dict):
                 comp.update(result)
         except Exception as e:
@@ -1390,11 +1622,17 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
         return comp
 
+    t_step6_start = time.perf_counter()
     scored: list[dict] = []
     with ThreadPoolExecutor(max_workers=COMP_WORKERS) as ex:
         futures = [ex.submit(process_one_comp, dict(c)) for c in ranked]
         for f in as_completed(futures):
             scored.append(f.result())
+    t_step6_end = time.perf_counter()
+    try:
+        print(f"TIMING step6_total_download_and_score_seconds={(t_step6_end - t_step6_start):.3f}")
+    except Exception:
+        pass
 
     key_to_comp = {_rank_key(c): c for c in scored}
     scored_ordered = []
@@ -1416,14 +1654,20 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     arv_out = None
     if compute_arv is not None:
         print("STEP 8: ARV compute (top-3 selection + final ARV)\n")
+        t_arv_start = time.perf_counter()
         subject_for_arv = {"address": address, "beds": beds, "baths": baths, "sqft": sqft}
         subject_street = _extract_street_name(address)
         comps_for_arv = [_normalize_comp_for_arv(c, subject_street) for c in scored_ordered]
         arv_out = compute_arv(subject_for_arv, comps_for_arv, total_comps_returned=len(comps_all))
+        t_arv_end = time.perf_counter()
         print(f"ARV RESULT: {arv_out.get('status')} | {arv_out.get('message')}")
         if arv_out.get("arv") is not None:
             print(f"ARV: ${int(arv_out.get('arv')):,}")
         print("")
+        try:
+            print(f"TIMING step8_compute_arv_seconds={(t_arv_end - t_arv_start):.3f}")
+        except Exception:
+            pass
 
         try:
             selected = arv_out.get("selected_comps") or []
@@ -1431,6 +1675,11 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
                 arv_out["selected_comps_enriched"] = _enrich_arv_selected_comps(selected, by_zpid, by_url)
         except Exception:
             pass
+
+    try:
+        print(f"TIMING total_run_pipeline_seconds={(time.perf_counter() - t_total_start):.3f}")
+    except Exception:
+        pass
 
     return {
         "status": "ok",
