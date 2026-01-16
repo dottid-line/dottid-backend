@@ -70,6 +70,25 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: str = "false") -> bool:
+    v = (os.environ.get(name, default) or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def _env_bool_any(names: list[str], default: str = "false") -> bool:
+    """
+    Read the first set/usable env var in 'names', else fall back to default.
+    This lets you support accidental variants like CACHE_ENABLE vs CACHE_ENABLED.
+    """
+    for n in names:
+        raw = os.environ.get(n, None)
+        if raw is None:
+            continue
+        v = (raw or "").strip().lower()
+        return v in ("1", "true", "yes", "y", "on")
+    return _env_bool(names[0], default)
+
+
 # CHANGE: raise defaults for first-time properties
 GLOBAL_DOWNLOAD_WORKERS = _env_int("DOWNLOAD_WORKERS", 64)
 GLOBAL_MAX_INFLIGHT = _env_int("MAX_INFLIGHT", 32)
@@ -101,12 +120,7 @@ _DOWNLOAD_POOL: ThreadPoolExecutor | None = None
 # NOTE: does NOT cache ARV/results — it only caches raw Apify outputs.
 # If you want to invalidate cache after changing url-generation rules, bump APIFY_CACHE_VERSION.
 # ============================================================
-def _env_bool(name: str, default: str = "false") -> bool:
-    v = (os.environ.get(name, default) or "").strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
-
-
-APIFY_CACHE_ENABLED = _env_bool("APIFY_CACHE_ENABLED", "false")
+APIFY_CACHE_ENABLED = _env_bool_any(["APIFY_CACHE_ENABLED", "APIFY_CACHE_ENABLE"], "false")
 APIFY_CACHE_VERSION = (os.environ.get("APIFY_CACHE_VERSION", "1") or "1").strip()
 try:
     APIFY_CACHE_TTL_SECONDS = int((os.environ.get("APIFY_CACHE_TTL_SECONDS", "43200") or "43200").strip())
@@ -167,7 +181,7 @@ def _apify_cache_put_json(namespace: str, payload: dict, data: dict | list) -> N
 # ============================================================
 # DISK CACHE (OPTION B: comp image bytes by URL; TTL-based)
 # ============================================================
-CACHE_ENABLED = _env_bool("CACHE_ENABLED", "false")
+CACHE_ENABLED = _env_bool_any(["CACHE_ENABLED", "CACHE_ENABLE"], "false")
 CACHE_DIR = (os.environ.get("CACHE_DIR", "/tmp/dottid_cache") or "/tmp/dottid_cache").strip()
 try:
     CACHE_TTL_SECONDS = int((os.environ.get("CACHE_TTL_SECONDS", "43200") or "43200").strip())  # default 12 hours

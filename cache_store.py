@@ -17,6 +17,20 @@ def _sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name, "")
+    if v is None or str(v).strip() == "":
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, str(default))).strip())
+    except Exception:
+        return default
+
+
 class CacheStore:
     """
     CacheStore supports:
@@ -91,6 +105,15 @@ class CacheStore:
     # JSON
     # ----------------------------
     def get_json(self, key: str, ttl_seconds: int) -> Optional[dict]:
+        if ttl_seconds is None:
+            return None
+        try:
+            ttl_seconds = int(ttl_seconds)
+        except Exception:
+            return None
+        if ttl_seconds <= 0:
+            return None
+
         now = time.time()
         p = self._local_path(key, "json")
 
@@ -144,6 +167,15 @@ class CacheStore:
     # BYTES (images)
     # ----------------------------
     def get_bytes(self, key: str, ttl_seconds: int) -> Optional[bytes]:
+        if ttl_seconds is None:
+            return None
+        try:
+            ttl_seconds = int(ttl_seconds)
+        except Exception:
+            return None
+        if ttl_seconds <= 0:
+            return None
+
         now = time.time()
         p = self._local_path(key, "bin")
 
@@ -190,3 +222,77 @@ class CacheStore:
                 )
             except Exception:
                 pass
+
+
+# =============================================================================
+# ENV-DRIVEN SINGLETON + SIMPLE HELPERS (so pipeline can just import this module)
+# =============================================================================
+
+_CACHE_ENABLED = _env_bool("CACHE_ENABLED", default=False)
+_CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/dottid-cache").strip() or "/tmp/dottid-cache"
+_CACHE_TTL_SECONDS = _env_int("CACHE_TTL_SECONDS", 43200)  # default 12 hours
+
+# Optional S3 envs (ignored unless provided)
+_CACHE_S3_BUCKET = (os.environ.get("CACHE_S3_BUCKET", "") or "").strip() or None
+_CACHE_S3_PREFIX = (os.environ.get("CACHE_S3_PREFIX", "dottid-cache") or "dottid-cache").strip()
+_CACHE_AWS_REGION = (os.environ.get("AWS_REGION", "") or "").strip() or None
+
+_STORE: Optional[CacheStore] = None
+
+
+def cache_enabled() -> bool:
+    return bool(_CACHE_ENABLED)
+
+
+def cache_ttl_seconds() -> int:
+    return int(_CACHE_TTL_SECONDS)
+
+
+def get_store() -> CacheStore:
+    global _STORE
+    if _STORE is None:
+        _STORE = CacheStore(
+            local_dir=_CACHE_DIR,
+            s3_bucket=_CACHE_S3_BUCKET,
+            s3_prefix=_CACHE_S3_PREFIX,
+            aws_region=_CACHE_AWS_REGION,
+        )
+    return _STORE
+
+
+def cache_get_json(namespace: str, identity: dict, ttl_seconds: Optional[int] = None) -> Optional[dict]:
+    if not cache_enabled():
+        return None
+    ttl = cache_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
+    if ttl <= 0:
+        return None
+    store = get_store()
+    key = store.make_key(namespace, identity)
+    return store.get_json(key, ttl)
+
+
+def cache_set_json(namespace: str, identity: dict, data: dict) -> None:
+    if not cache_enabled():
+        return
+    store = get_store()
+    key = store.make_key(namespace, identity)
+    store.put_json(key, data)
+
+
+def cache_get_bytes(namespace: str, identity: dict, ttl_seconds: Optional[int] = None) -> Optional[bytes]:
+    if not cache_enabled():
+        return None
+    ttl = cache_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
+    if ttl <= 0:
+        return None
+    store = get_store()
+    key = store.make_key(namespace, identity)
+    return store.get_bytes(key, ttl)
+
+
+def cache_set_bytes(namespace: str, identity: dict, data: bytes) -> None:
+    if not cache_enabled():
+        return
+    store = get_store()
+    key = store.make_key(namespace, identity)
+    store.put_bytes(key, data)
