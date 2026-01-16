@@ -3,6 +3,7 @@
 from pipeline import run_pipeline
 from estimator import estimate_rehab
 from mao_formula import compute_mao
+from inference_engine import classify_images
 
 
 def run_full_underwrite(subject, logger=None):
@@ -98,9 +99,34 @@ def run_full_underwrite(subject, logger=None):
     # ---------------------------------------------------
     log("STEP 2 → Estimating rehab...")
 
+    # CHANGE: Rehab must be driven by SUBJECT uploaded images (validator→room→condition),
+    # not comp/Zillow-scored images from the pipeline.
+    subject_image_results = []
+    try:
+        up_paths = subject.get("uploaded_image_paths", []) or []
+        log(f"STEP 2 INPUT → uploaded_image_paths_count={len(up_paths)}")
+
+        if up_paths:
+            subject_image_results = classify_images(up_paths, device="cpu", logger=log) or []
+        else:
+            subject_image_results = []
+
+        valid_cnt = sum(1 for r in (subject_image_results or []) if r.get("valid") is True)
+        log(
+            "STEP 2 INPUT → "
+            f"classify_images_total={len(subject_image_results) if isinstance(subject_image_results, list) else 0} "
+            f"classify_images_valid={valid_cnt}"
+        )
+    except Exception as e:
+        try:
+            log(f"STEP 2 INPUT → classify_images_failed err='{str(e)}' (falling back to pipeline scored)")
+        except Exception:
+            pass
+        subject_image_results = pipeline_out.get("scored", [])
+
     rehab_data = estimate_rehab(
         subject,
-        pipeline_out.get("scored", []),
+        subject_image_results,
     )
 
     log("STEP 2 COMPLETE.")
