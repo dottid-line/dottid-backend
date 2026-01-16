@@ -220,25 +220,42 @@ def process_job(job_id: str, payload: dict):
     if not job:
         return
 
+    def log(msg: str):
+        try:
+            print(f"[JOB {job_id}] {msg}", flush=True)
+        except Exception:
+            pass
+
     job["status"] = "processing"
     job["updated_at"] = datetime.utcnow().isoformat()
     save_job(job_id, job)
 
     try:
-        image_blobs = payload.get("image_blobs", [])
+        subject = payload.get("subject", {}) or {}
+        image_blobs = payload.get("image_blobs", []) or []
+
+        log("START process_job()")
+        log(f"Input address='{subject.get('address','')}' beds={subject.get('beds')} baths={subject.get('baths')} sqft={subject.get('sqft')} year_built={subject.get('year_built')}")
+        log(f"Input deal_type='{subject.get('deal_type','')}' assignment_fee='{subject.get('assignment_fee','')}' condition='{subject.get('condition','')}' units='{subject.get('units','')}'")
+        log(f"Images received (raw upload count) = {len(image_blobs)}")
+
         img_info = _save_uploaded_images_to_temp(image_blobs)
 
-        subject = payload.get("subject", {}) or {}
         subject["uploaded_image_paths"] = img_info.get("files", [])
         subject["uploaded_image_temp_dir"] = img_info.get("temp_dir")
 
+        log(f"Saved images to temp. temp_dir='{subject.get('uploaded_image_temp_dir')}' valid_saved_files={len(subject.get('uploaded_image_paths') or [])}")
+
+        log("Calling run_full_underwrite(subject)...")
         result = run_full_underwrite(subject)
+        log("Returned from run_full_underwrite(subject).")
 
         # ------------------------------------------------------------------
         # CHANGE: if underwriting returns nothing/invalid, treat as NOT_ENOUGH_USABLE_COMPS
         # (prevents blank/failed ARV outcome when searches return 0 comps)
         # ------------------------------------------------------------------
         if not result or not isinstance(result, dict):
+            log("UNDERWRITE RESULT INVALID -> treating as NOT_ENOUGH_USABLE_COMPS fallback.")
             rehab_raw = {}
             rehab = 45000
             try:
@@ -260,15 +277,27 @@ def process_job(job_id: str, payload: dict):
             job["error"] = None
             job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
+
+            log("FINAL RESULT (fallback invalid underwriting):")
+            try:
+                log(json.dumps(job["result"], indent=2))
+            except Exception:
+                log(str(job["result"]))
             return
 
         arv_obj = result.get("arv")
+        rehab_raw = result.get("rehab", {}) if isinstance(result, dict) else {}
+        try:
+            rehab_dbg = int(float(rehab_raw.get("estimate_numeric", 45000)))
+        except Exception:
+            rehab_dbg = 45000
+        log(f"Underwrite debug: arv_obj_type={type(arv_obj).__name__} rehab_estimate_numeric={rehab_dbg}")
 
         # ------------------------------------------------------------------
         # CHANGE: if ARV object missing/invalid, treat as NOT_ENOUGH_USABLE_COMPS
         # ------------------------------------------------------------------
         if not isinstance(arv_obj, dict):
-            rehab_raw = result.get("rehab", {}) if isinstance(result, dict) else {}
+            log("ARV OBJECT INVALID -> treating as NOT_ENOUGH_USABLE_COMPS fallback.")
             try:
                 rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
             except Exception:
@@ -287,6 +316,12 @@ def process_job(job_id: str, payload: dict):
             job["error"] = None
             job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
+
+            log("FINAL RESULT (fallback invalid ARV object):")
+            try:
+                log(json.dumps(job["result"], indent=2))
+            except Exception:
+                log(str(job["result"]))
             return
 
         # ------------------------------------------------------------------
@@ -296,13 +331,15 @@ def process_job(job_id: str, payload: dict):
         arv_msg = str(arv_obj.get("message") or "").upper().strip()
         arv_value_direct = arv_obj.get("arv", None)
 
+        log(f"ARV status='{arv_status}' message='{arv_msg}' arv_value_direct='{arv_value_direct}'")
+
         if (
             "NOT_ENOUGH_USABLE_COMPS" in arv_msg
             or "NOT_ENOUGH_COMPS" in arv_msg
             or (arv_value_direct is None and "NOT_ENOUGH" in arv_msg)
             or (arv_value_direct is None and arv_status in ["fail", "failed"])
         ):
-            rehab_raw = result.get("rehab", {})
+            log("ARV indicates NOT_ENOUGH_* -> returning graceful NOT_ENOUGH_USABLE_COMPS result.")
             rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
 
             job["status"] = "complete"
@@ -318,26 +355,39 @@ def process_job(job_id: str, payload: dict):
             job["error"] = None
             job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
+
+            log("FINAL RESULT (NOT_ENOUGH_*):")
+            try:
+                log(json.dumps(job["result"], indent=2))
+            except Exception:
+                log(str(job["result"]))
             return
 
         arv = int(_extract_arv_value(arv_obj))
+        log(f"Extracted ARV={arv}")
 
-        rehab_raw = result.get("rehab", {})
         rehab = int(float(rehab_raw.get("estimate_numeric", 45000)))
+        log(f"Extracted Rehab={rehab}")
 
         deal_type = (subject.get("deal_type") or "").lower().strip()
         assignment_fee = float(subject.get("assignment_fee") or 0)
+        log(f"MAO inputs: deal_type='{deal_type}' assignment_fee={assignment_fee}")
 
         if deal_type == "rental":
             mao = int(arv * 0.85 - rehab)
+            log("MAO formula: arv*0.85 - rehab")
         elif deal_type == "flip":
             mao = int(arv * 0.75 - rehab)
+            log("MAO formula: arv*0.75 - rehab")
         elif deal_type == "wholesale":
             mao = int(arv * 0.75 - rehab - assignment_fee)
+            log("MAO formula: arv*0.75 - rehab - assignment_fee")
         else:
             mao = int(arv * 0.75 - rehab)
+            log("MAO formula: arv*0.75 - rehab (default)")
 
         mao = max(mao, 0)
+        log(f"Computed MAO={mao} (clamped >=0)")
 
         # ----------------------------
         # COMPS: pull from underwriting result (enriched comps)
@@ -367,6 +417,8 @@ def process_job(job_id: str, payload: dict):
             except Exception:
                 comps_out = []
 
+        log(f"Comps selected (raw count)={len(comps_out) if isinstance(comps_out, list) else 0}")
+
         # Normalize + upgrade thumbnail URLs
         normalized_comps = []
         for c in comps_out if isinstance(comps_out, list) else []:
@@ -391,6 +443,8 @@ def process_job(job_id: str, payload: dict):
                 }
             )
 
+        log(f"Comps normalized (count)={len(normalized_comps)}")
+
         job["status"] = "complete"
         job["result"] = {
             "arv": arv,
@@ -403,10 +457,20 @@ def process_job(job_id: str, payload: dict):
         }
         job["error"] = None
 
+        log("FINAL RESULT (will be returned by GET /jobs/results/{job_id}):")
+        try:
+            log(json.dumps(job["result"], indent=2))
+        except Exception:
+            log(str(job["result"]))
+
     except Exception as e:
         traceback.print_exc()
         job["status"] = "failed"
         job["error"] = str(e)
+        try:
+            print(f"[JOB {job_id}] FAILED: {str(e)}", flush=True)
+        except Exception:
+            pass
 
     job["updated_at"] = datetime.utcnow().isoformat()
     save_job(job_id, job)

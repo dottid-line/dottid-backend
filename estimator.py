@@ -478,6 +478,13 @@ def estimate_rehab(subject, image_results):
         # Keep sqft_cost consistent with the displayed estimate in this case
         sqft_cost = 10000
 
+    # ------------------------------------------------------------------
+    # ✅ NEW RULE: Absolute minimum rehab is $10,000 (never show less)
+    # ------------------------------------------------------------------
+    if estimate < 10000:
+        estimate = 10000
+        estimate_str = "$10,000"
+
     return {
         "tier": base_mult,
         "rate_per_sqft": base_mult,

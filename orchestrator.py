@@ -14,10 +14,35 @@ def run_full_underwrite(subject, logger=None):
     """
 
     def log(msg):
+        try:
+            print(msg, flush=True)
+        except Exception:
+            pass
         if logger:
             logger(msg)
 
     log("START → run_full_underwrite()")
+
+    # ---------------------------------------------------
+    # INPUT SUMMARY
+    # ---------------------------------------------------
+    try:
+        log(
+            "INPUT → "
+            f"address='{subject.get('address','')}' "
+            f"beds={subject.get('beds', 0)} "
+            f"baths={subject.get('baths', 0)} "
+            f"sqft={subject.get('sqft', 0)} "
+            f"year_built={subject.get('year_built', 0)} "
+            f"property_type='{subject.get('property_type','')}' "
+            f"deal_type='{subject.get('deal_type','')}' "
+            f"assignment_fee='{subject.get('assignment_fee','')}' "
+            f"condition='{subject.get('condition','')}'"
+        )
+        up_paths = subject.get("uploaded_image_paths", []) or []
+        log(f"INPUT → uploaded_image_paths_count={len(up_paths)}")
+    except Exception:
+        pass
 
     # ---------------------------------------------------
     # STEP 1: ARV + COMPS
@@ -49,6 +74,25 @@ def run_full_underwrite(subject, logger=None):
         except:
             arv_value = 0
 
+    try:
+        if isinstance(arv_section, dict):
+            arv_status = str(arv_section.get("status") or "")
+            arv_msg = str(arv_section.get("message") or "")
+            comps_enriched = arv_section.get("selected_comps_enriched") or []
+            comps_basic = arv_section.get("selected_comps") or []
+            log(
+                "STEP 1 RESULT → "
+                f"arv_value={arv_value} "
+                f"status='{arv_status}' "
+                f"message='{arv_msg}' "
+                f"selected_comps_enriched_count={len(comps_enriched) if isinstance(comps_enriched, list) else 0} "
+                f"selected_comps_count={len(comps_basic) if isinstance(comps_basic, list) else 0}"
+            )
+        scored = pipeline_out.get("scored", [])
+        log(f"STEP 1 RESULT → scored_images_count={len(scored) if isinstance(scored, list) else 0}")
+    except Exception:
+        pass
+
     # ---------------------------------------------------
     # STEP 2: REHAB ESTIMATE
     # ---------------------------------------------------
@@ -62,6 +106,23 @@ def run_full_underwrite(subject, logger=None):
     log("STEP 2 COMPLETE.")
 
     rehab_cost = rehab_data.get("estimate_numeric", 0)
+
+    try:
+        log(
+            "STEP 2 RESULT → "
+            f"property_tier='{rehab_data.get('property_tier')}' "
+            f"estimate_numeric={rehab_data.get('estimate_numeric')} "
+            f"estimate_str='{rehab_data.get('estimate_str')}' "
+            f"sqft_cost={rehab_data.get('sqft_cost')} "
+            f"kitchen_cost={rehab_data.get('kitchen_cost')} "
+            f"bath_cost={rehab_data.get('bath_cost')} "
+            f"roof_cost={rehab_data.get('roof_cost')} "
+            f"hvac_cost={rehab_data.get('hvac_cost')} "
+            f"foundation_cost={rehab_data.get('foundation_cost')} "
+            f"total_images={rehab_data.get('total_images')}"
+        )
+    except Exception:
+        pass
 
     # ---------------------------------------------------
     # STEP 3: MAO
@@ -77,6 +138,16 @@ def run_full_underwrite(subject, logger=None):
 
     log("STEP 3 COMPLETE.")
 
+    try:
+        log(
+            "STEP 3 RESULT → "
+            f"arv_value={arv_value} rehab_cost={rehab_cost} "
+            f"assignment_fee={subject.get('assignment_fee', 0)} deal_type='{subject.get('deal_type','')}' "
+            f"mao_formatted='{mao_str}'"
+        )
+    except Exception:
+        pass
+
     # ---------------------------------------------------
     # WRAP & RETURN
     # ---------------------------------------------------
@@ -91,6 +162,11 @@ def run_full_underwrite(subject, logger=None):
             "mao_formatted": mao_str,
         },
     }
+
+    try:
+        log("WRAP RESULT → keys=" + ",".join(list(result.keys())))
+    except Exception:
+        pass
 
     log("DONE → run_full_underwrite() COMPLETE.")
     return result
