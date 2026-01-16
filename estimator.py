@@ -208,7 +208,7 @@ def estimate_rehab(subject, image_results):
     has_k_needs = any(r.get("condition") == "needsrehab" for r in strong_kitchens)
     has_b_needs = any(r.get("condition") == "needsrehab" for r in strong_baths)
 
-    # fullyupdated ratio (all images, not just strong)
+    # fullyupdated ratio (all validated images, not just strong)
     if total_imgs > 0:
         fully_count = sum(
             1 for r in image_results if r.get("condition") == "fullyupdated"
@@ -237,42 +237,34 @@ def estimate_rehab(subject, image_results):
 
     # ------------------------------------------------------------------
     # ✅ NEW RULES:
-    #   - If there are >=10 VALIDATED INTERIOR images AND at least 1 kitchen image,
+    #   - If there are >=10 VALIDATED images AND at least 1 kitchen image,
     #     pull condition solely from images (users can lie, images can't).
-    #   - Otherwise (less than 10 interior OR no kitchen), fall back to user-selected condition.
+    #   - Otherwise (less than 10 validated OR no kitchen), fall back to user-selected condition.
     #   - Fullyupdated can only be assigned if user selected fullyupdated AND images confirm it.
     #   - If images show fullyupdated but user did NOT select fullyupdated, clamp to solidcondition.
     #   - Kitchen has heavier weight: if kitchen is worse than property tier, property tier becomes kitchen.
     #   - If user says worse than images, images can only improve by +1 tier (except fullyupdated caveat above).
     # ------------------------------------------------------------------
-    INTERIOR_ROOM_TYPES = {
+    VALID_ROOM_TYPES = {
         "kitchen",
         "bathroom",
         "bedroom",
         "living_room",
         "dining_room",
-        "family_room",
-        "basement",
-        "attic",
-        "hallway",
-        "laundry",
-        "office",
-        "den",
-        "bonus_room",
     }
 
-    interior_valid = [
+    valid_room_imgs = [
         r for r in image_results
-        if (r.get("room_type") in INTERIOR_ROOM_TYPES)
+        if (r.get("room_type") in VALID_ROOM_TYPES)
     ]
-    interior_count = len(interior_valid)
-    interior_has_kitchen = any(r.get("room_type") == "kitchen" for r in interior_valid)
+    validated_count = len(valid_room_imgs)
+    validated_has_kitchen = any(r.get("room_type") == "kitchen" for r in valid_room_imgs)
 
-    if interior_count > 0:
-        interior_fully = sum(1 for r in interior_valid if r.get("condition") == "fullyupdated")
-        interior_fully_ratio = interior_fully / float(interior_count)
+    if validated_count > 0:
+        validated_fully = sum(1 for r in valid_room_imgs if r.get("condition") == "fullyupdated")
+        validated_fully_ratio = validated_fully / float(validated_count)
     else:
-        interior_fully_ratio = 0.0
+        validated_fully_ratio = 0.0
 
     def _tier_rank(t):
         order = {"fullyupdated": 0, "solidcondition": 1, "needsrehab": 2, "fullrehab": 3}
@@ -287,7 +279,7 @@ def estimate_rehab(subject, image_results):
     kitchen_final = None
     bath_final = None
 
-    images_trusted = (interior_count >= 10) and interior_has_kitchen
+    images_trusted = (validated_count > 9) and validated_has_kitchen
 
     if not images_trusted:
         property_tier = subject_condition_label
@@ -301,13 +293,13 @@ def estimate_rehab(subject, image_results):
     else:
         # Majority condition from strong images, fallback to subject condition label
         kitchen_final = _majority_condition(
-            kitchen_imgs,
+            [r for r in kitchen_imgs if r.get("room_type") in VALID_ROOM_TYPES],
             default_label=subject_condition_label,
             min_room_conf=MIN_CONF,
             min_cond_conf=MIN_CONF
         )
         bath_final = _majority_condition(
-            bath_imgs,
+            [r for r in bath_imgs if r.get("room_type") in VALID_ROOM_TYPES],
             default_label=subject_condition_label,
             min_room_conf=MIN_CONF,
             min_cond_conf=MIN_CONF
@@ -398,12 +390,12 @@ def estimate_rehab(subject, image_results):
                 else:
                     property_tier = "needsrehab"
             else:
-                # Fully updated rule: K + B updated + >10 images + ≥80% fullyupdated
+                # Fully updated rule: K + B updated + >9 validated images + ≥80% fullyupdated
                 if (
                     kitchen_final == "fullyupdated"
                     and bath_final == "fullyupdated"
-                    and total_imgs > 10
-                    and fully_ratio_all >= 0.80
+                    and validated_count > 9
+                    and validated_fully_ratio >= 0.80
                 ):
                     property_tier = "fullyupdated"
                 else:
@@ -424,12 +416,12 @@ def estimate_rehab(subject, image_results):
 
         # ------------------------------------------------------------------
         # Fullyupdated image confirmation rules:
-        #   - To be fullyupdated overall, kitchen must be fullyupdated and >=80% interior fullyupdated.
+        #   - To be fullyupdated overall, kitchen must be fullyupdated and >=80% validated fullyupdated.
         #   - If images look fullyupdated but user did NOT select fullyupdated -> clamp to solidcondition.
         # ------------------------------------------------------------------
         images_look_fullyupdated = (
             kitchen_final == "fullyupdated"
-            and interior_fully_ratio >= 0.80
+            and validated_fully_ratio >= 0.80
         )
 
         if images_look_fullyupdated:
@@ -511,16 +503,16 @@ def estimate_rehab(subject, image_results):
         base_mult = 15
 
     # ------------------------------------------------------------------
-    # ✅ OVERRIDE: Fully Updated + >6 VALIDATED INTERIOR IMAGES + ≥80% fullyupdated
+    # ✅ OVERRIDE: Fully Updated + >9 VALIDATED images + ≥80% fullyupdated
     #            + must include at least 1 kitchen image
     #            + kitchen must be fullyupdated
     #            + no roof/hvac/foundation -> show "<$10,000" and numeric 10000
     # ------------------------------------------------------------------
     if (
         subject_condition_label == "fullyupdated"
-        and interior_count > 9
-        and interior_has_kitchen
-        and interior_fully_ratio >= 0.80
+        and validated_count > 9
+        and validated_has_kitchen
+        and validated_fully_ratio >= 0.80
         and kitchen_final == "fullyupdated"
         and roof_cost == 0
         and hvac_cost == 0

@@ -532,11 +532,19 @@ def job_status(job_id: str):
     if not job:
         return {"status": "not_found"}
 
+    # CHANGE: include images_received in status to verify whether backend received uploads
+    images_received = 0
+    try:
+        images_received = int((job.get("input") or {}).get("images_received") or 0)
+    except Exception:
+        images_received = 0
+
     return {
         "status": job.get("status"),
         "has_result": job.get("status") == "complete",
         "error": job.get("error"),
         "updated_at": job.get("updated_at"),
+        "images_received": images_received,
     }
 
 @app.get("/jobs/results/{job_id}")
