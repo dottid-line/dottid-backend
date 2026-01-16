@@ -95,13 +95,74 @@ _dl_ctypes = Counter()
 _DOWNLOAD_POOL: ThreadPoolExecutor | None = None
 
 # ============================================================
-# DISK CACHE (OPTION B: comp image bytes by URL; TTL-based)
+# PIPELINE CACHE (12h) — avoids re-running Apify + downloads for identical inputs
+# Keyed ONLY by: address, beds, baths, sqft, year_built, property_type
+# NOTE: if you change ranking/ARV logic and want different outputs, bump PIPELINE_CACHE_VERSION.
 # ============================================================
 def _env_bool(name: str, default: str = "false") -> bool:
     v = (os.environ.get(name, default) or "").strip().lower()
     return v in ("1", "true", "yes", "y", "on")
 
 
+PIPELINE_CACHE_ENABLED = _env_bool("PIPELINE_CACHE_ENABLED", "false")
+PIPELINE_CACHE_VERSION = (os.environ.get("PIPELINE_CACHE_VERSION", "1") or "1").strip()
+try:
+    PIPELINE_CACHE_TTL_SECONDS = int((os.environ.get("PIPELINE_CACHE_TTL_SECONDS", "43200") or "43200").strip())
+except Exception:
+    PIPELINE_CACHE_TTL_SECONDS = 43200
+
+try:
+    from cache_store import cache_get as _pipeline_cache_get
+    from cache_store import cache_set as _pipeline_cache_set
+except Exception:
+    _pipeline_cache_get = None
+    _pipeline_cache_set = None
+
+
+def _norm_addr_for_cache(address: str) -> str:
+    if not isinstance(address, str):
+        return ""
+    s = address.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _try_float(x, default=0.0) -> float:
+    try:
+        if x is None:
+            return float(default)
+        return float(x)
+    except Exception:
+        return float(default)
+
+
+def _try_int_safe(x, default=0) -> int:
+    try:
+        if x is None:
+            return int(default)
+        return int(float(x))
+    except Exception:
+        return int(default)
+
+
+def _pipeline_cache_key(address: str, beds: float, baths: float, sqft: int, year: int, property_type: str) -> str:
+    payload = {
+        "v": PIPELINE_CACHE_VERSION,
+        "address": _norm_addr_for_cache(address),
+        "beds": round(_try_float(beds), 2),
+        "baths": round(_try_float(baths), 2),
+        "sqft": _try_int_safe(sqft),
+        "year": _try_int_safe(year),
+        "property_type": (property_type or "").strip().lower(),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+    return f"pipeline:{h}"
+
+
+# ============================================================
+# DISK CACHE (OPTION B: comp image bytes by URL; TTL-based)
+# ============================================================
 CACHE_ENABLED = _env_bool("CACHE_ENABLED", "false")
 CACHE_DIR = (os.environ.get("CACHE_DIR", "/tmp/dottid_cache") or "/tmp/dottid_cache").strip()
 try:
@@ -1323,6 +1384,24 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     except Exception:
         compute_arv = None  # type: ignore[assignment]
 
+    # -----------------------------------------------
+    # PIPELINE CACHE HIT CHECK (before heavy work)
+    # -----------------------------------------------
+    cache_key = None
+    if (
+        PIPELINE_CACHE_ENABLED
+        and callable(_pipeline_cache_get)
+        and callable(_pipeline_cache_set)
+    ):
+        try:
+            cache_key = _pipeline_cache_key(address, beds, baths, sqft, year, property_type)
+            cached = _pipeline_cache_get(cache_key, ttl_seconds=PIPELINE_CACHE_TTL_SECONDS)
+            if isinstance(cached, dict) and cached:
+                print("\nCACHE HIT: returning cached pipeline result (skipping Apify + downloads)\n")
+                return cached
+        except Exception:
+            cache_key = None
+
     apify_session = create_apify_session()
 
     t_total_start = time.perf_counter()
@@ -1409,7 +1488,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         except Exception:
             pass
 
-        return {
+        result_payload = {
             "status": "ok",
             "ranked": [],
             "scored": [],
@@ -1420,6 +1499,14 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
             "similarity_threshold": SIMILARITY_THRESHOLD,
             "outlier_debug": {},
         }
+
+        if cache_key and PIPELINE_CACHE_ENABLED and callable(_pipeline_cache_set):
+            try:
+                _pipeline_cache_set(cache_key, result_payload, ttl_seconds=PIPELINE_CACHE_TTL_SECONDS)
+            except Exception:
+                pass
+
+        return result_payload
 
     print(f"\nTotal comps collected (after dedupe/top-up): {len(comps_all)}\n")
 
@@ -1502,7 +1589,15 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     if not ranked:
         print(f"Final comps kept: 0 (threshold={SIMILARITY_THRESHOLD}, target={MAX_COMPS_TO_SCORE})")
         print("No comps available to proceed. Pipeline stopping before detail/download.\n")
-        return {"status": "fail", "message": "NOT_ENOUGH_USABLE_COMPS", "ranked": [], "arv": None}
+        result_payload = {"status": "fail", "message": "NOT_ENOUGH_USABLE_COMPS", "ranked": [], "arv": None}
+
+        if cache_key and PIPELINE_CACHE_ENABLED and callable(_pipeline_cache_set):
+            try:
+                _pipeline_cache_set(cache_key, result_payload, ttl_seconds=PIPELINE_CACHE_TTL_SECONDS)
+            except Exception:
+                pass
+
+        return result_payload
 
     print(f"Comps with sim>=0.35 in countable pool: {countable_sim_ge}")
     print(f"Total comps selected for scoring/print: {len(ranked)}/{MAX_COMPS_TO_SCORE}")
@@ -1681,7 +1776,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     except Exception:
         pass
 
-    return {
+    result_payload = {
         "status": "ok",
         "ranked": ranked,
         "scored": scored_ordered,
@@ -1692,6 +1787,17 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "outlier_debug": outlier_dbg,
     }
+
+    # -----------------------------------------------
+    # PIPELINE CACHE WRITE (end)
+    # -----------------------------------------------
+    if cache_key and PIPELINE_CACHE_ENABLED and callable(_pipeline_cache_set):
+        try:
+            _pipeline_cache_set(cache_key, result_payload, ttl_seconds=PIPELINE_CACHE_TTL_SECONDS)
+        except Exception:
+            pass
+
+    return result_payload
 
 
 # ============================================================
