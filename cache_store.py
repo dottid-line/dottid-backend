@@ -1,183 +1,192 @@
 # cache_store.py
-"""
-Simple TTL cache store for Render-like environments.
-
-- Stores JSON blobs on local disk (default: /tmp/dottid_cache)
-- TTL enforced per entry (default caller TTL = 12 hours)
-- Safe atomic-ish writes (write temp -> replace)
-- Key is hashed to a filename (no filesystem issues)
-
-Usage:
-    from cache_store import cache_get, cache_set
-
-    v = cache_get("some-key", ttl_seconds=43200)
-    if v is None:
-        v = {"hello": "world"}
-        cache_set("some-key", v)
-"""
-
-from __future__ import annotations
-
 import os
 import json
 import time
 import hashlib
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional, Union
+
+try:
+    import boto3  # optional
+except Exception:
+    boto3 = None
 
 
-# Default cache directory (Render writable)
-CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/tmp/dottid_cache")).resolve()
+def _sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
-def _ensure_dir() -> None:
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # If we can't create the directory, caching is effectively disabled.
-        pass
-
-
-def _hash_key(key: str) -> str:
-    h = hashlib.sha256(key.encode("utf-8", errors="ignore")).hexdigest()
-    return h
-
-
-def _path_for_key(key: str) -> Path:
-    # file name includes a short prefix for easier debugging
-    h = _hash_key(key)
-    return CACHE_DIR / f"cache_{h}.json"
-
-
-def _now() -> float:
-    return time.time()
-
-
-def cache_get(key: str, ttl_seconds: int = 43200) -> Optional[dict]:
+class CacheStore:
     """
-    Return cached value dict if present and not expired, else None.
-    ttl_seconds is evaluated against the stored 'created_at' timestamp.
+    CacheStore supports:
+      - Local filesystem cache (fast)
+      - Optional S3 cache (persistent across instances)
     """
-    if not isinstance(key, str) or not key.strip():
-        return None
 
-    _ensure_dir()
-    p = _path_for_key(key)
+    def __init__(
+        self,
+        local_dir: Union[str, Path] = "/tmp/dottid-cache",
+        s3_bucket: Optional[str] = None,
+        s3_prefix: str = "dottid-cache",
+        aws_region: Optional[str] = None,
+    ):
+        self.local_dir = Path(str(local_dir))
+        self.local_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        if not p.exists():
-            return None
+        self.s3_bucket = (s3_bucket or "").strip() or None
+        self.s3_prefix = s3_prefix.strip("/")
 
-        raw = p.read_text(encoding="utf-8")
-        obj = json.loads(raw)
+        self.s3 = None
+        if self.s3_bucket and boto3 is not None:
+            sess = boto3.session.Session(region_name=aws_region) if aws_region else boto3.session.Session()
+            self.s3 = sess.client("s3")
 
-        if not isinstance(obj, dict):
-            return None
+    # ----------------------------
+    # Keying
+    # ----------------------------
+    def make_key(self, namespace: str, identity: dict) -> str:
+        # canonicalize identity to avoid cache-miss due to spacing / ordering
+        canon = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        return f"{namespace}/{_sha1(canon)}"
 
-        created_at = obj.get("created_at")
-        if created_at is None:
-            return None
+    def _local_path(self, key: str, ext: str) -> Path:
+        safe = key.replace("/", "_")
+        return self.local_dir / f"{safe}.{ext}"
 
+    def _s3_key(self, key: str, ext: str) -> str:
+        return f"{self.s3_prefix}/{key}.{ext}"
+
+    def _atomic_write_bytes(self, path: Path, data: bytes) -> None:
+        """
+        Atomic write to avoid partial/corrupt cache files under high concurrency.
+        Writes to a temp file in the same directory then replaces.
+        """
         try:
-            created_at_f = float(created_at)
-        except Exception:
-            return None
-
-        age = _now() - created_at_f
-        if age < 0:
-            # clock weirdness; treat as miss
-            return None
-
-        if ttl_seconds is not None:
-            try:
-                ttl_f = float(ttl_seconds)
-            except Exception:
-                ttl_f = 43200.0
-            if age > ttl_f:
-                # expired: best-effort delete
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=str(path.parent), delete=False) as tf:
+                tmp_name = tf.name
+                tf.write(data)
+                tf.flush()
                 try:
-                    p.unlink(missing_ok=True)  # py3.8+: missing_ok may not exist; handle below
-                except TypeError:
-                    try:
-                        if p.exists():
-                            p.unlink()
-                    except Exception:
-                        pass
+                    os.fsync(tf.fileno())
                 except Exception:
                     pass
-                return None
-
-        val = obj.get("value")
-        if isinstance(val, dict):
-            return val
-        # allow returning any JSON-serializable root, but keep API consistent
-        return {"_value": val}
-
-    except Exception:
-        return None
-
-
-def cache_set(key: str, value: Any, ttl_seconds: int = 43200) -> bool:
-    """
-    Store value with current timestamp.
-    Returns True if write succeeded, else False.
-    """
-    if not isinstance(key, str) or not key.strip():
-        return False
-
-    _ensure_dir()
-    p = _path_for_key(key)
-
-    payload = {
-        "created_at": _now(),
-        "ttl_seconds": int(ttl_seconds) if isinstance(ttl_seconds, int) else 43200,
-        "value": value,
-    }
-
-    try:
-        # Write to a temp file in same dir, then replace
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix="tmp_cache_", suffix=".json", dir=str(CACHE_DIR))
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
-            os.replace(tmp_path, str(p))
-        finally:
-            # If replace failed, tmp may still exist
+            os.replace(tmp_name, str(path))
+        except Exception:
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                # best-effort cleanup of temp file if replace failed
+                if "tmp_name" in locals() and tmp_name:
+                    try:
+                        os.remove(tmp_name)
+                    except Exception:
+                        pass
             except Exception:
                 pass
-        return True
-    except Exception:
-        return False
 
+    def _atomic_write_text(self, path: Path, text: str, encoding: str = "utf-8") -> None:
+        self._atomic_write_bytes(path, text.encode(encoding))
 
-def cache_delete(key: str) -> bool:
-    """Best-effort delete of a cache entry."""
-    if not isinstance(key, str) or not key.strip():
-        return False
-    _ensure_dir()
-    p = _path_for_key(key)
-    try:
-        p.unlink()
-        return True
-    except Exception:
-        return False
+    # ----------------------------
+    # JSON
+    # ----------------------------
+    def get_json(self, key: str, ttl_seconds: int) -> Optional[dict]:
+        now = time.time()
+        p = self._local_path(key, "json")
 
+        # 1) local hit
+        if p.exists():
+            age = now - p.stat().st_mtime
+            if age <= ttl_seconds:
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
 
-def cache_info() -> dict:
-    """Basic info for debugging."""
-    _ensure_dir()
-    try:
-        files = list(CACHE_DIR.glob("cache_*.json"))
-        return {
-            "cache_dir": str(CACHE_DIR),
-            "entries": len(files),
-        }
-    except Exception:
-        return {
-            "cache_dir": str(CACHE_DIR),
-            "entries": None,
-        }
+        # 2) S3 hit
+        if self.s3 and self.s3_bucket:
+            try:
+                obj = self.s3.get_object(Bucket=self.s3_bucket, Key=self._s3_key(key, "json"))
+                body = obj["Body"].read()
+                data = json.loads(body.decode("utf-8"))
+                # refresh local (atomic)
+                try:
+                    self._atomic_write_text(p, json.dumps(data), encoding="utf-8")
+                except Exception:
+                    pass
+                return data
+            except Exception:
+                return None
+
+        return None
+
+    def put_json(self, key: str, data: dict) -> None:
+        p = self._local_path(key, "json")
+        payload = json.dumps(data, ensure_ascii=False)
+
+        try:
+            self._atomic_write_text(p, payload, encoding="utf-8")
+        except Exception:
+            pass
+
+        if self.s3 and self.s3_bucket:
+            try:
+                self.s3.put_object(
+                    Bucket=self.s3_bucket,
+                    Key=self._s3_key(key, "json"),
+                    Body=payload.encode("utf-8"),
+                    ContentType="application/json",
+                )
+            except Exception:
+                pass
+
+    # ----------------------------
+    # BYTES (images)
+    # ----------------------------
+    def get_bytes(self, key: str, ttl_seconds: int) -> Optional[bytes]:
+        now = time.time()
+        p = self._local_path(key, "bin")
+
+        # 1) local hit
+        if p.exists():
+            age = now - p.stat().st_mtime
+            if age <= ttl_seconds:
+                try:
+                    return p.read_bytes()
+                except Exception:
+                    pass
+
+        # 2) S3 hit
+        if self.s3 and self.s3_bucket:
+            try:
+                obj = self.s3.get_object(Bucket=self.s3_bucket, Key=self._s3_key(key, "bin"))
+                body = obj["Body"].read()
+                # refresh local (atomic)
+                try:
+                    self._atomic_write_bytes(p, body)
+                except Exception:
+                    pass
+                return body
+            except Exception:
+                return None
+
+        return None
+
+    def put_bytes(self, key: str, data: bytes) -> None:
+        p = self._local_path(key, "bin")
+
+        try:
+            self._atomic_write_bytes(p, data)
+        except Exception:
+            pass
+
+        if self.s3 and self.s3_bucket:
+            try:
+                self.s3.put_object(
+                    Bucket=self.s3_bucket,
+                    Key=self._s3_key(key, "bin"),
+                    Body=data,
+                    ContentType="application/octet-stream",
+                )
+            except Exception:
+                pass
