@@ -3,7 +3,6 @@
 from pipeline import run_pipeline
 from estimator import estimate_rehab
 from mao_formula import compute_mao
-from inference_engine import classify_images
 
 
 def run_full_underwrite(subject, logger=None):
@@ -107,6 +106,8 @@ def run_full_underwrite(subject, logger=None):
         log(f"STEP 2 INPUT → uploaded_image_paths_count={len(up_paths)}")
 
         if up_paths:
+            # CHANGE: lazy import to avoid crashing app on startup
+            from inference_engine import classify_images
             subject_image_results = classify_images(up_paths, device="cpu", logger=log) or []
         else:
             subject_image_results = []
