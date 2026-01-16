@@ -236,11 +236,60 @@ def estimate_rehab(subject, image_results):
     subject_condition_label = WEB_CONDITION_TO_TIER.get(subject_condition_key, "needsrehab")
 
     # ------------------------------------------------------------------
-    # ✅ NEW RULE: if there is NO kitchen image at all, do NOT compute off images.
-    #             Fall back to the user-selected condition only.
+    # ✅ NEW RULES:
+    #   - If there are >=10 VALIDATED INTERIOR images AND at least 1 kitchen image,
+    #     pull condition solely from images (users can lie, images can't).
+    #   - Otherwise (less than 10 interior OR no kitchen), fall back to user-selected condition.
+    #   - Fullyupdated can only be assigned if user selected fullyupdated AND images confirm it.
+    #   - If images show fullyupdated but user did NOT select fullyupdated, clamp to solidcondition.
+    #   - Kitchen has heavier weight: if kitchen is worse than property tier, property tier becomes kitchen.
+    #   - If user says worse than images, images can only improve by +1 tier (except fullyupdated caveat above).
     # ------------------------------------------------------------------
+    INTERIOR_ROOM_TYPES = {
+        "kitchen",
+        "bathroom",
+        "bedroom",
+        "living_room",
+        "dining_room",
+        "family_room",
+        "basement",
+        "attic",
+        "hallway",
+        "laundry",
+        "office",
+        "den",
+        "bonus_room",
+    }
+
+    interior_valid = [
+        r for r in image_results
+        if (r.get("room_type") in INTERIOR_ROOM_TYPES)
+    ]
+    interior_count = len(interior_valid)
+    interior_has_kitchen = any(r.get("room_type") == "kitchen" for r in interior_valid)
+
+    if interior_count > 0:
+        interior_fully = sum(1 for r in interior_valid if r.get("condition") == "fullyupdated")
+        interior_fully_ratio = interior_fully / float(interior_count)
+    else:
+        interior_fully_ratio = 0.0
+
+    def _tier_rank(t):
+        order = {"fullyupdated": 0, "solidcondition": 1, "needsrehab": 2, "fullrehab": 3}
+        return order.get(t, 2)
+
+    def _tier_from_rank(r):
+        inv = {0: "fullyupdated", 1: "solidcondition", 2: "needsrehab", 3: "fullrehab"}
+        return inv.get(int(r), "needsrehab")
+
+    # Default outputs
     property_tier = None  # "fullyupdated" | "solidcondition" | "needsrehab" | "fullrehab"
-    if len(kitchen_imgs) == 0:
+    kitchen_final = None
+    bath_final = None
+
+    images_trusted = (interior_count >= 10) and interior_has_kitchen
+
+    if not images_trusted:
         property_tier = subject_condition_label
         kitchen_final = subject_condition_label
         bath_final = subject_condition_label
@@ -265,13 +314,7 @@ def estimate_rehab(subject, image_results):
         )
 
         # ------------------------------------------------------------------
-        # NO-IMAGE CASE: USER CONDITION FALLBACK (never infer fullrehab)
-        # ------------------------------------------------------------------
-        if total_imgs == 0:
-            property_tier = subject_condition_label
-
-        # ------------------------------------------------------------------
-        # IMAGE-BASED CLASSIFICATION
+        # IMAGE-BASED CLASSIFICATION (existing rules)
         # ------------------------------------------------------------------
         if property_tier is None:
             # FULL GUT TRIGGERS
@@ -373,18 +416,65 @@ def estimate_rehab(subject, image_results):
                     else:
                         property_tier = "needsrehab"
 
+        # ------------------------------------------------------------------
+        # Kitchen heavier weight: if kitchen is worse than property_tier, property_tier becomes kitchen.
+        # ------------------------------------------------------------------
+        if _tier_rank(kitchen_final) > _tier_rank(property_tier):
+            property_tier = kitchen_final
+
+        # ------------------------------------------------------------------
+        # Fullyupdated image confirmation rules:
+        #   - To be fullyupdated overall, kitchen must be fullyupdated and >=80% interior fullyupdated.
+        #   - If images look fullyupdated but user did NOT select fullyupdated -> clamp to solidcondition.
+        # ------------------------------------------------------------------
+        images_look_fullyupdated = (
+            kitchen_final == "fullyupdated"
+            and interior_fully_ratio >= 0.80
+        )
+
+        if images_look_fullyupdated:
+            if subject_condition_label == "fullyupdated":
+                property_tier = "fullyupdated"
+            else:
+                property_tier = "solidcondition"
+
+        # ------------------------------------------------------------------
+        # Clamp logic between user and images:
+        #   - If user says better than images -> images win fully (already true via property_tier from images)
+        #   - If user says worse than images -> images can only improve by +1 tier
+        #     (except: fullyupdated cannot be granted unless user selected fullyupdated + images confirm it)
+        # ------------------------------------------------------------------
+        user_r = _tier_rank(subject_condition_label)
+        img_r = _tier_rank(property_tier)
+
+        if user_r > img_r:
+            # user worse than images (images would improve)
+            clamped_r = user_r - 1
+            clamped_tier = _tier_from_rank(clamped_r)
+
+            # prevent granting fullyupdated unless user selected fullyupdated AND images confirm it
+            if clamped_tier == "fullyupdated":
+                if not (subject_condition_label == "fullyupdated" and images_look_fullyupdated):
+                    clamped_tier = "solidcondition"
+
+            property_tier = clamped_tier
+
+            # keep kitchen/bath finals aligned to new tier for downstream pricing maps
+            kitchen_final = property_tier
+            bath_final = property_tier
+
     # ------------------------------------------------------------------
     # COST MAPS
     # ------------------------------------------------------------------
     kitchen_cost_map = {
         "fullyupdated": 0,
-        "solidcondition": 3000,
-        "needsrehab": 12000,
+        "solidcondition": 5000,
+        "needsrehab": 13000,
         "fullrehab": 25000,
     }
     bath_cost_map = {
         "fullyupdated": 0,
-        "solidcondition": 2000,
+        "solidcondition": 3000,
         "needsrehab": 7500,
         "fullrehab": 12000,
     }
@@ -423,42 +513,15 @@ def estimate_rehab(subject, image_results):
     # ------------------------------------------------------------------
     # ✅ OVERRIDE: Fully Updated + >6 VALIDATED INTERIOR IMAGES + ≥80% fullyupdated
     #            + must include at least 1 kitchen image
+    #            + kitchen must be fullyupdated
     #            + no roof/hvac/foundation -> show "<$10,000" and numeric 10000
     # ------------------------------------------------------------------
-    INTERIOR_ROOM_TYPES = {
-        "kitchen",
-        "bathroom",
-        "bedroom",
-        "living_room",
-        "dining_room",
-        "family_room",
-        "basement",
-        "attic",
-        "hallway",
-        "laundry",
-        "office",
-        "den",
-        "bonus_room",
-    }
-
-    interior_valid = [
-        r for r in image_results
-        if (r.get("room_type") in INTERIOR_ROOM_TYPES)
-    ]
-    interior_count = len(interior_valid)
-    interior_has_kitchen = any(r.get("room_type") == "kitchen" for r in interior_valid)
-
-    if interior_count > 0:
-        interior_fully = sum(1 for r in interior_valid if r.get("condition") == "fullyupdated")
-        interior_fully_ratio = interior_fully / float(interior_count)
-    else:
-        interior_fully_ratio = 0.0
-
     if (
         subject_condition_label == "fullyupdated"
         and interior_count > 9
         and interior_has_kitchen
         and interior_fully_ratio >= 0.80
+        and kitchen_final == "fullyupdated"
         and roof_cost == 0
         and hvac_cost == 0
         and foundation_cost == 0
