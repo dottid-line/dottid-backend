@@ -333,3 +333,4 @@ if __name__ == "__main__":
     print(f"Condition: {res.get('condition')}")
     print(f"\nTiming: {res.get('timing')}")
 
+

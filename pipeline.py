@@ -70,28 +70,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    v = (os.environ.get(name, default) or "").strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
-
-
-def _env_bool_any(names: list[str], default: str = "false") -> bool:
-    """
-    Read the first set/usable env var in 'names', else fall back to default.
-    This lets you support accidental variants like CACHE_ENABLE vs CACHE_ENABLED.
-    """
-    for n in names:
-        raw = os.environ.get(n, None)
-        if raw is None:
-            continue
-        v = (raw or "").strip().lower()
-        return v in ("1", "true", "yes", "y", "on")
-    return _env_bool(names[0], default)
-
-
-# CHANGE: raise defaults for first-time properties
-GLOBAL_DOWNLOAD_WORKERS = _env_int("DOWNLOAD_WORKERS", 64)
-GLOBAL_MAX_INFLIGHT = _env_int("MAX_INFLIGHT", 32)
+GLOBAL_DOWNLOAD_WORKERS = _env_int("DOWNLOAD_WORKERS", 8)
+GLOBAL_MAX_INFLIGHT = _env_int("MAX_INFLIGHT", 4)
 IMG_MAX_RETRIES = _env_int("IMG_MAX_RETRIES", 4)
 
 GLOBAL_DOWNLOAD_WORKERS = max(8, min(GLOBAL_DOWNLOAD_WORKERS, 256))
@@ -115,73 +95,14 @@ _dl_ctypes = Counter()
 _DOWNLOAD_POOL: ThreadPoolExecutor | None = None
 
 # ============================================================
-# APIFY CACHE (12h) — avoids re-running Apify search/detail for identical inputs
-# Keyed by: Zillow search URL (for search) and list of detail URLs (for detail)
-# NOTE: does NOT cache ARV/results — it only caches raw Apify outputs.
-# If you want to invalidate cache after changing url-generation rules, bump APIFY_CACHE_VERSION.
-# ============================================================
-APIFY_CACHE_ENABLED = _env_bool_any(["APIFY_CACHE_ENABLED", "APIFY_CACHE_ENABLE"], "false")
-APIFY_CACHE_VERSION = (os.environ.get("APIFY_CACHE_VERSION", "1") or "1").strip()
-try:
-    APIFY_CACHE_TTL_SECONDS = int((os.environ.get("APIFY_CACHE_TTL_SECONDS", "43200") or "43200").strip())
-except Exception:
-    APIFY_CACHE_TTL_SECONDS = 43200
-
-APIFY_CACHE_DIR = (os.environ.get("APIFY_CACHE_DIR", "/tmp/dottid-apify-cache") or "/tmp/dottid-apify-cache").strip()
-
-try:
-    from cache_store import CacheStore
-except Exception:
-    CacheStore = None  # type: ignore[assignment]
-
-_APIFY_CACHE = None
-if CacheStore is not None:
-    try:
-        _APIFY_CACHE = CacheStore(local_dir=APIFY_CACHE_DIR, s3_bucket=None)
-    except Exception:
-        _APIFY_CACHE = None
-
-
-def _apify_cache_make_key(namespace: str, payload: dict) -> str | None:
-    if not APIFY_CACHE_ENABLED or _APIFY_CACHE is None:
-        return None
-    try:
-        p = dict(payload or {})
-        p["v"] = APIFY_CACHE_VERSION
-        return _APIFY_CACHE.make_key(namespace, p)
-    except Exception:
-        return None
-
-
-def _apify_cache_get_json(namespace: str, payload: dict) -> dict | None:
-    if not APIFY_CACHE_ENABLED or _APIFY_CACHE is None:
-        return None
-    try:
-        k = _apify_cache_make_key(namespace, payload)
-        if not k:
-            return None
-        return _APIFY_CACHE.get_json(k, ttl_seconds=APIFY_CACHE_TTL_SECONDS)
-    except Exception:
-        return None
-
-
-def _apify_cache_put_json(namespace: str, payload: dict, data: dict | list) -> None:
-    if not APIFY_CACHE_ENABLED or _APIFY_CACHE is None:
-        return
-    try:
-        k = _apify_cache_make_key(namespace, payload)
-        if not k:
-            return
-        # store as {"data": ...} so local file is always a dict
-        _APIFY_CACHE.put_json(k, {"data": data})
-    except Exception:
-        pass
-
-
-# ============================================================
 # DISK CACHE (OPTION B: comp image bytes by URL; TTL-based)
 # ============================================================
-CACHE_ENABLED = _env_bool_any(["CACHE_ENABLED", "CACHE_ENABLE"], "false")
+def _env_bool(name: str, default: str = "false") -> bool:
+    v = (os.environ.get(name, default) or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+CACHE_ENABLED = _env_bool("CACHE_ENABLED", "false")
 CACHE_DIR = (os.environ.get("CACHE_DIR", "/tmp/dottid_cache") or "/tmp/dottid_cache").strip()
 try:
     CACHE_TTL_SECONDS = int((os.environ.get("CACHE_TTL_SECONDS", "43200") or "43200").strip())  # default 12 hours
@@ -821,18 +742,8 @@ def _rewrite_url_width(url: str, target_w: int) -> str:
     if not isinstance(url, str) or not url.startswith("http"):
         return url
     target_w = max(MIN_IMAGE_WIDTH, int(target_w))
-
-    # 1) querystring width params
     u2 = re.sub(r"([?&](?:width|w)=)\d+", rf"\g<1>{target_w}", url, flags=re.IGNORECASE)
-    if u2 != url:
-        return u2
-
-    # 2) Zillow cc_ft_### size in path
-    u3 = re.sub(r"(?i)(-cc_ft_)\d+(\.(?:jpg|jpeg|png|webp))", rf"\g<1>{target_w}\2", url)
-    if u3 != url:
-        return u3
-
-    return url
+    return u2 if u2 != url else url
 
 
 def _collect_url_candidates(obj):
@@ -900,11 +811,9 @@ def extract_photo_urls(detail_item: dict) -> list[str]:
             bl = best.lower()
             if "photos.zillowstatic.com/fp/" not in bl:
                 continue
-            # Ensure best is resized down if possible (cc_ft_### or width params)
-            best2 = _rewrite_url_width(best, TARGET_IMAGE_WIDTH)
-            if best2 not in seen:
-                seen.add(best2)
-                urls.append(best2)
+            if best not in seen:
+                seen.add(best)
+                urls.append(best)
     return urls
 
 
@@ -921,11 +830,9 @@ def find_photo_urls_anywhere(detail_item: dict) -> list[str]:
         return True
 
     for u, _w in _collect_url_candidates(detail_item):
-        if ok(u):
-            u2 = _rewrite_url_width(u, TARGET_IMAGE_WIDTH)
-            if u2 not in seen:
-                seen.add(u2)
-                urls.append(u2)
+        if ok(u) and u not in seen:
+            seen.add(u)
+            urls.append(u)
     return urls
 
 
@@ -1435,35 +1342,13 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
     print("\nSTEP 2: Apify search scrape (6 months)\n")
     t_search6_start = time.perf_counter()
-
-    comps_6 = None
+    comps_6 = _run_search_scrape(apify_session, zillow_url_6) or []
+    t_search6_end = time.perf_counter()
+    print(f"6-month comps returned: {len(comps_6)}")
     try:
-        cached6 = _apify_cache_get_json("search_6mo", {"zillow_url": zillow_url_6})
-        if isinstance(cached6, dict) and isinstance(cached6.get("data"), list):
-            comps_6 = cached6.get("data")
+        print(f"TIMING step2_apify_search_6mo_seconds={(t_search6_end - t_search6_start):.3f}")
     except Exception:
-        comps_6 = None
-
-    if comps_6 is None:
-        comps_6 = _run_search_scrape(apify_session, zillow_url_6) or []
-        try:
-            _apify_cache_put_json("search_6mo", {"zillow_url": zillow_url_6}, comps_6)
-        except Exception:
-            pass
-        t_search6_end = time.perf_counter()
-        print(f"6-month comps returned: {len(comps_6)}")
-        try:
-            print(f"TIMING step2_apify_search_6mo_seconds={(t_search6_end - t_search6_start):.3f}")
-        except Exception:
-            pass
-    else:
-        t_search6_end = time.perf_counter()
-        print(f"6-month comps returned: {len(comps_6)}")
-        try:
-            print("CACHE HIT: step2_apify_search_6mo (skipping Apify)")
-            print("TIMING step2_apify_search_6mo_seconds=0.000")
-        except Exception:
-            pass
+        pass
 
     comps_all = list(comps_6)
 
@@ -1485,35 +1370,13 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
             pass
 
         t_search12_start = time.perf_counter()
-
-        comps_12 = None
+        comps_12 = _run_search_scrape(apify_session, zillow_url_12) or []
+        t_search12_end = time.perf_counter()
+        print(f"12-month comps returned: {len(comps_12)}")
         try:
-            cached12 = _apify_cache_get_json("search_12mo", {"zillow_url": zillow_url_12})
-            if isinstance(cached12, dict) and isinstance(cached12.get("data"), list):
-                comps_12 = cached12.get("data")
+            print(f"TIMING step3_apify_search_12mo_seconds={(t_search12_end - t_search12_start):.3f}")
         except Exception:
-            comps_12 = None
-
-        if comps_12 is None:
-            comps_12 = _run_search_scrape(apify_session, zillow_url_12) or []
-            try:
-                _apify_cache_put_json("search_12mo", {"zillow_url": zillow_url_12}, comps_12)
-            except Exception:
-                pass
-            t_search12_end = time.perf_counter()
-            print(f"12-month comps returned: {len(comps_12)}")
-            try:
-                print(f"TIMING step3_apify_search_12mo_seconds={(t_search12_end - t_search12_start):.3f}")
-            except Exception:
-                pass
-        else:
-            t_search12_end = time.perf_counter()
-            print(f"12-month comps returned: {len(comps_12)}")
-            try:
-                print("CACHE HIT: step3_apify_search_12mo (skipping Apify)")
-                print("TIMING step3_apify_search_12mo_seconds=0.000")
-            except Exception:
-                pass
+            pass
 
         comps_all.extend(comps_12)
 
@@ -1546,7 +1409,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         except Exception:
             pass
 
-        result_payload = {
+        return {
             "status": "ok",
             "ranked": [],
             "scored": [],
@@ -1557,8 +1420,6 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
             "similarity_threshold": SIMILARITY_THRESHOLD,
             "outlier_debug": {},
         }
-
-        return result_payload
 
     print(f"\nTotal comps collected (after dedupe/top-up): {len(comps_all)}\n")
 
@@ -1641,8 +1502,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     if not ranked:
         print(f"Final comps kept: 0 (threshold={SIMILARITY_THRESHOLD}, target={MAX_COMPS_TO_SCORE})")
         print("No comps available to proceed. Pipeline stopping before detail/download.\n")
-        result_payload = {"status": "fail", "message": "NOT_ENOUGH_USABLE_COMPS", "ranked": [], "arv": None}
-        return result_payload
+        return {"status": "fail", "message": "NOT_ENOUGH_USABLE_COMPS", "ranked": [], "arv": None}
 
     print(f"Comps with sim>=0.35 in countable pool: {countable_sim_ge}")
     print(f"Total comps selected for scoring/print: {len(ranked)}/{MAX_COMPS_TO_SCORE}")
@@ -1658,42 +1518,15 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
 
     detail_items = []
     if detail_urls:
-        # Cache detail scrape by the URL set (so if ranking changes, cache naturally misses)
-        cache_payload = {"urls": sorted([d.get("url") for d in detail_urls if isinstance(d.get("url"), str)])}
-        cached_detail = None
-        try:
-            cached_detail = _apify_cache_get_json("detail_batch", cache_payload)
-        except Exception:
-            cached_detail = None
-
-        if isinstance(cached_detail, dict) and isinstance(cached_detail.get("data"), list):
-            detail_items = cached_detail.get("data")
-            t_detail_end = time.perf_counter()
-            try:
-                print("CACHE HIT: step5_apify_detail (skipping Apify)")
-                print("TIMING step5_apify_detail_seconds=0.000")
-            except Exception:
-                pass
-        else:
-            detail_payload = {"startUrls": detail_urls}
-            detail_items = apify_run_sync_get_dataset_items(apify_session, DETAIL_ACTOR_ID, detail_payload, timeout_sec=APIFY_TIMEOUT_SEC)
-            if not isinstance(detail_items, list):
-                detail_items = []
-            try:
-                _apify_cache_put_json("detail_batch", cache_payload, detail_items)
-            except Exception:
-                pass
-            t_detail_end = time.perf_counter()
-            try:
-                print(f"TIMING step5_apify_detail_seconds={(t_detail_end - t_detail_start):.3f}")
-            except Exception:
-                pass
-    else:
-        t_detail_end = time.perf_counter()
-        try:
-            print(f"TIMING step5_apify_detail_seconds={(t_detail_end - t_detail_start):.3f}")
-        except Exception:
-            pass
+        detail_payload = {"startUrls": detail_urls}
+        detail_items = apify_run_sync_get_dataset_items(apify_session, DETAIL_ACTOR_ID, detail_payload, timeout_sec=APIFY_TIMEOUT_SEC)
+    if not isinstance(detail_items, list):
+        detail_items = []
+    t_detail_end = time.perf_counter()
+    try:
+        print(f"TIMING step5_apify_detail_seconds={(t_detail_end - t_detail_start):.3f}")
+    except Exception:
+        pass
 
     by_zpid, by_url = build_detail_index(detail_items)
 
@@ -1848,7 +1681,7 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     except Exception:
         pass
 
-    result_payload = {
+    return {
         "status": "ok",
         "ranked": ranked,
         "scored": scored_ordered,
@@ -1859,8 +1692,6 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "outlier_debug": outlier_dbg,
     }
-
-    return result_payload
 
 
 # ============================================================
