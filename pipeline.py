@@ -440,7 +440,15 @@ def apify_run_sync_get_dataset_items(session: requests.Session, actor_id: str, p
 
 
 def _run_search_scrape(apify_session: requests.Session, zillow_url: str) -> list[dict]:
-    payload = {"searchUrls": [{"url": zillow_url}]}
+    payload = {
+        "searchUrls": [{"url": zillow_url}],
+        "extractionMethod": "PAGINATION_WITHOUT_ZOOMING_IN",
+        "proxyConfiguration": {
+            "useApifyProxy": True,
+            "apifyProxyGroups": ["RESIDENTIAL"],
+            "countryCode": "US",
+        },
+    }
     run_id = apify_post_run(apify_session, SEARCH_ACTOR_ID, payload)
     apify_wait_run(apify_session, run_id)
     items = apify_get_run_dataset_items(apify_session, run_id)
