@@ -383,6 +383,7 @@ def process_job(job_id: str, payload: dict):
 
             job["status"] = "complete"
             job["result"] = {
+                "subject_address": subject.get("address", ""),
                 "arv": "NOT_ENOUGH_USABLE_COMPS",
                 "arv_str": "NOT_ENOUGH_USABLE_COMPS",
                 "estimated_rehab": rehab,
@@ -424,6 +425,7 @@ def process_job(job_id: str, payload: dict):
 
             job["status"] = "complete"
             job["result"] = {
+                "subject_address": subject.get("address", ""),
                 "arv": "NOT_ENOUGH_USABLE_COMPS",
                 "arv_str": "NOT_ENOUGH_USABLE_COMPS",
                 "estimated_rehab": rehab,
@@ -465,6 +467,7 @@ def process_job(job_id: str, payload: dict):
 
             job["status"] = "complete"
             job["result"] = {
+                "subject_address": subject.get("address", ""),
                 "arv": "NOT_ENOUGH_USABLE_COMPS",
                 "arv_str": "NOT_ENOUGH_USABLE_COMPS",
                 "estimated_rehab": rehab,
@@ -570,6 +573,7 @@ def process_job(job_id: str, payload: dict):
 
         job["status"] = "complete"
         job["result"] = {
+            "subject_address": subject.get("address", ""),
             "arv": arv,
             "arv_str": f"${arv:,.0f}",
             "estimated_rehab": rehab,
