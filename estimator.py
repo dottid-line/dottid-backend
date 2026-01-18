@@ -236,14 +236,8 @@ def estimate_rehab(subject, image_results):
     subject_condition_label = WEB_CONDITION_TO_TIER.get(subject_condition_key, "needsrehab")
 
     # ------------------------------------------------------------------
-    # ✅ NEW RULES:
-    #   - If there are >=10 VALIDATED images AND at least 1 kitchen image,
-    #     pull condition solely from images (users can lie, images can't).
-    #   - Otherwise (less than 10 validated OR no kitchen), fall back to user-selected condition.
-    #   - Fullyupdated can only be assigned if user selected fullyupdated AND images confirm it.
-    #   - If images show fullyupdated but user did NOT select fullyupdated, clamp to solidcondition.
-    #   - Kitchen has heavier weight: if kitchen is worse than property tier, property tier becomes kitchen.
-    #   - If user says worse than images, images can only improve by +1 tier (except fullyupdated caveat above).
+    # ✅ CHANGE: Always compute rehab strictly from the user-selected condition tier.
+    #           Images are still accepted/processed for collection/saving, but do NOT affect rehab.
     # ------------------------------------------------------------------
     VALID_ROOM_TYPES = {
         "kitchen",
@@ -279,17 +273,13 @@ def estimate_rehab(subject, image_results):
     kitchen_final = None
     bath_final = None
 
-    images_trusted = (validated_count > 9) and validated_has_kitchen
+    # Force images_trusted off so rehab tier comes ONLY from subject_condition_label
+    images_trusted = False
 
     if not images_trusted:
         property_tier = subject_condition_label
         kitchen_final = subject_condition_label
         bath_final = subject_condition_label
-
-        # keep counters consistent for return payload
-        total_other_strong = 0
-        others_full_count = 0
-        others_needs_count = 0
     else:
         # Majority condition from strong images, fallback to subject condition label
         kitchen_final = _majority_condition(
@@ -508,7 +498,7 @@ def estimate_rehab(subject, image_results):
     #            + kitchen must be fullyupdated
     #            + no roof/hvac/foundation -> show "<$10,000" and numeric 10000
     # ------------------------------------------------------------------
-    if (
+    if False and (
         subject_condition_label == "fullyupdated"
         and validated_count > 9
         and validated_has_kitchen
