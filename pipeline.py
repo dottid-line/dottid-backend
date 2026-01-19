@@ -1455,7 +1455,9 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
     if comps_6 is None:
         comps_6 = _run_search_scrape(apify_session, zillow_url_6) or []
         try:
-            _apify_cache_put_json("search_6mo", {"zillow_url": zillow_url_6}, comps_6)
+            # CHANGE: never cache empty search outputs
+            if len(comps_6) > 0:
+                _apify_cache_put_json("search_6mo", {"zillow_url": zillow_url_6}, comps_6)
         except Exception:
             pass
         t_search6_end = time.perf_counter()
@@ -1505,7 +1507,9 @@ def run_pipeline(address: str, beds: float, baths: float, sqft: int, year: int, 
         if comps_12 is None:
             comps_12 = _run_search_scrape(apify_session, zillow_url_12) or []
             try:
-                _apify_cache_put_json("search_12mo", {"zillow_url": zillow_url_12}, comps_12)
+                # CHANGE: never cache empty search outputs
+                if len(comps_12) > 0:
+                    _apify_cache_put_json("search_12mo", {"zillow_url": zillow_url_12}, comps_12)
             except Exception:
                 pass
             t_search12_end = time.perf_counter()
