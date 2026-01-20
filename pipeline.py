@@ -24,7 +24,8 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 BASE_DIR = Path(__file__).resolve().parent
 
-SEARCH_ACTOR_ID = "api-empire~zillow-search-scraper"
+# ✅ CHANGE: swap SEARCH actor to maxcopell/zillow-scraper (search only)
+SEARCH_ACTOR_ID = "maxcopell~zillow-scraper"
 DETAIL_ACTOR_ID = "maxcopell~zillow-detail-scraper"
 
 # ✅ IMPORTANT: do NOT hardcode tokens in code (GitHub blocks pushes)
@@ -439,20 +440,78 @@ def apify_run_sync_get_dataset_items(session: requests.Session, actor_id: str, p
     return r.json()
 
 
+# ✅ CHANGE: normalize maxcopell/zillow-scraper output into the shape the rest of this pipeline expects
+def _normalize_search_items(items: Any) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        detail_url = (
+            it.get("detailUrl")
+            or it.get("detail_url")
+            or it.get("url")
+            or it.get("detailURL")
+            or it.get("listingUrl")
+            or it.get("zillowUrl")
+        )
+
+        comp = {
+            # Keep original item for downstream code paths that read comp["raw"][...]
+            "raw": it,
+
+            # Common identifiers
+            "zpid": it.get("zpid") or it.get("id"),
+            "id": it.get("id") or it.get("zpid"),
+
+            # Convenience top-level fields (ranker/printing)
+            "address": it.get("address"),
+            "beds": it.get("beds") if it.get("beds") is not None else it.get("bedrooms"),
+            "baths": it.get("baths") if it.get("baths") is not None else it.get("bathrooms"),
+            "area": it.get("area") if it.get("area") is not None else it.get("livingArea") or it.get("sqft"),
+
+            # Ensure our existing code can find the detail URL
+            "detail_url": detail_url,
+            "detailUrl": detail_url,
+            "url": detail_url,
+        }
+
+        # Price-ish fields (sold/for-sale vary by query)
+        for k in (
+            "soldPrice",
+            "sold_price",
+            "price",
+            "unformattedPrice",
+            "formattedPrice",
+            "soldDate",
+            "dateSold",
+        ):
+            if k in it and comp.get(k) is None:
+                comp[k] = it.get(k)
+
+        # Lat/long container (sometimes used by rankers)
+        if it.get("latLong") is not None:
+            comp["latLong"] = it.get("latLong")
+
+        out.append(comp)
+    return out
+
+
 def _run_search_scrape(apify_session: requests.Session, zillow_url: str) -> list[dict]:
+    # maxcopell/zillow-scraper input schema:
+    #   - searchUrls: [{ url: "..." }]
+    #   - extractionMethod: "PAGINATION_WITH_ZOOM_IN" | "PAGINATION" | "MAP_MARKERS"
     payload = {
         "searchUrls": [{"url": zillow_url}],
-        "extractionMethod": "PAGINATION_WITHOUT_ZOOMING_IN",
-        "proxyConfiguration": {
-            "useApifyProxy": True,
-            "apifyProxyGroups": ["RESIDENTIAL"],
-            "countryCode": "US",
-        },
+        # Use the lighter, stable method (no zoom-in loops)
+        "extractionMethod": "PAGINATION",
     }
-    run_id = apify_post_run(apify_session, SEARCH_ACTOR_ID, payload)
-    apify_wait_run(apify_session, run_id)
-    items = apify_get_run_dataset_items(apify_session, run_id)
-    return items if isinstance(items, list) else []
+
+    items = apify_run_sync_get_dataset_items(apify_session, SEARCH_ACTOR_ID, payload, timeout_sec=APIFY_TIMEOUT_SEC)
+    # The API returns a JSON list of items for run-sync-get-dataset-items
+    return _normalize_search_items(items)
 
 
 # ============================================================
