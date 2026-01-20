@@ -33,7 +33,6 @@ if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
 class EmailLeadIn(BaseModel):
     email: EmailStr
     source: str = "email_gate"
-    page: Optional[str] = None
 
 # ----------------------------
 # REDIS (OPTIONAL)
@@ -725,8 +724,6 @@ def create_email_lead(payload: EmailLeadIn):
     row = {
         "email": str(payload.email).lower().strip(),
         "source": payload.source,
-        "page": payload.page,
-        "created_at": datetime.utcnow().isoformat(),
     }
 
     try:
