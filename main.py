@@ -18,6 +18,24 @@ from PIL import Image
 import pillow_heif
 
 # ----------------------------
+# SUPABASE (EMAIL LEADS)
+# ----------------------------
+from pydantic import BaseModel, EmailStr
+from supabase import create_client, Client
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+class EmailLeadIn(BaseModel):
+    email: EmailStr
+    source: str = "email_gate"
+    page: Optional[str] = None
+
+# ----------------------------
 # REDIS (OPTIONAL)
 # ----------------------------
 try:
@@ -695,3 +713,24 @@ def job_results(job_id: str):
         return {"error": "not_ready"}
 
     return job.get("result")
+
+# ------------------------------------------------------------------
+# EMAIL LEADS (OPTION B)
+# ------------------------------------------------------------------
+@app.post("/leads/email")
+def create_email_lead(payload: EmailLeadIn):
+    if supabase is None:
+        return {"ok": False, "error": "supabase_not_configured"}
+
+    row = {
+        "email": str(payload.email).lower().strip(),
+        "source": payload.source,
+        "page": payload.page,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    try:
+        supabase.table("email_leads").insert(row).execute()
+        return {"ok": True}
+    except Exception:
+        return {"ok": False, "error": "insert_failed"}
