@@ -12,3 +12,5 @@ torch==2.5.0
 torchvision==0.20.0
 boto3==1.34.162
 
+# --- Supabase (for email capture) ---
+supabase==2.7.4
