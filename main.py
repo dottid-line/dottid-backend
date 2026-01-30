@@ -223,6 +223,33 @@ def load_job(job_id: str) -> Optional[dict]:
     return json.loads(raw) if raw else None
 
 # ------------------------------------------------------------------
+# AUTOSCALE QUEUE + TIMEOUTS
+# ------------------------------------------------------------------
+JOBS_QUEUE_KEY = (os.environ.get("JOBS_QUEUE_KEY", "") or "").strip() or "jobs:pending"
+
+try:
+    JOB_START_TIMEOUT_SECONDS = int((os.environ.get("JOB_START_TIMEOUT_SECONDS", "90") or "90").strip())
+except Exception:
+    JOB_START_TIMEOUT_SECONDS = 90
+
+try:
+    JOB_MAX_WAIT_SECONDS = int((os.environ.get("JOB_MAX_WAIT_SECONDS", "300") or "300").strip())
+except Exception:
+    JOB_MAX_WAIT_SECONDS = 300
+
+def enqueue_job(job_id: str):
+    # Worker will BLPOP this list key
+    redis_client.rpush(JOBS_QUEUE_KEY, job_id)
+
+def _parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s))
+    except Exception:
+        return None
+
+# ------------------------------------------------------------------
 # CACHE SETTINGS (OPTIONAL; DISK-BASED)
 # ------------------------------------------------------------------
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -808,7 +835,8 @@ async def create_job(form_data: Optional[str] = Form(None)):
     }
     save_job(job_id, job)
 
-    executor.submit(process_job, job_id, {"subject": subject, "uploaded_s3_keys": []})
+    # CHANGE: enqueue job for worker instead of running underwriting in API
+    enqueue_job(job_id)
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -865,7 +893,9 @@ async def start_job(form_data: Optional[str] = Form(None), images: List[UploadFi
     }
 
     save_job(job_id, job)
-    executor.submit(process_job, job_id, {"subject": subject, "uploaded_s3_keys": uploaded_keys})
+
+    # CHANGE: enqueue job for worker instead of running underwriting in API
+    enqueue_job(job_id)
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -896,13 +926,20 @@ def job_results(job_id: str):
     if not job:
         return {"error": "not_found"}
 
-    # ------------------------------------------------------------------
     # CHANGE: failed jobs should be terminal (not "not_ready" forever)
-    # ------------------------------------------------------------------
     if job.get("status") == "failed":
         return {"error": "failed", "message": job.get("error") or "Unknown error"}
 
     if job.get("status") != "complete":
+        # CHANGE: starting/retry logic for autoscaling queue delays
+        created_dt = _parse_iso_dt(job.get("created_at"))
+        if created_dt is not None:
+            age = (datetime.utcnow() - created_dt).total_seconds()
+            if age > float(JOB_MAX_WAIT_SECONDS):
+                return {"status": "retry", "message": "High demand right now—please retry in a moment."}
+            if age > float(JOB_START_TIMEOUT_SECONDS):
+                return {"status": "starting", "message": "High demand right now—starting your run. Keep this tab open."}
+
         return {"error": "not_ready"}
 
     outputs_key = job.get("outputs_s3_key") or f"jobs/outputs/{job_id}.json"
