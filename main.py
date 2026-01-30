@@ -82,6 +82,79 @@ def debug_ping(request: Request):
     }
 
 # ------------------------------------------------------------------
+# OPS: SELF TEST (Redis + Jobs S3)
+# ------------------------------------------------------------------
+@app.get("/ops/self-test")
+def ops_self_test():
+    out = {"redis": "not_configured", "jobs_s3": "not_configured"}
+
+    # -------------------------
+    # 1) Redis test
+    # -------------------------
+    try:
+        if "redis_client" in globals() and redis_client is not None:
+            redis_client.ping()
+            out["redis"] = "ok"
+        else:
+            redis_url = (os.environ.get("REDIS_URL", "") or "").strip()
+            if redis and redis_url:
+                r = redis.Redis.from_url(redis_url, decode_responses=True)
+                r.ping()
+                out["redis"] = "ok"
+            else:
+                out["redis"] = "missing REDIS_URL or redis library"
+    except Exception as e:
+        out["redis"] = f"error: {str(e)}"
+
+    # -------------------------
+    # 2) Jobs S3 test (PUT/GET/DELETE)
+    # -------------------------
+    bucket = (os.environ.get("JOBS_S3_BUCKET", "") or "").strip()
+    region = (os.environ.get("JOBS_AWS_REGION", "") or "").strip()
+    ak = (os.environ.get("JOBS_AWS_ACCESS_KEY_ID", "") or "").strip()
+    sk = (os.environ.get("JOBS_AWS_SECRET_ACCESS_KEY", "") or "").strip()
+
+    if not bucket or not region or not ak or not sk:
+        out["jobs_s3"] = "missing JOBS_* env vars"
+        return out
+
+    try:
+        import boto3
+
+        s3 = boto3.client(
+            "s3",
+            region_name=region,
+            aws_access_key_id=ak,
+            aws_secret_access_key=sk,
+        )
+
+        key = f"ops/self-test-{int(time.time())}.txt"
+        body = b"ok"
+
+        # PUT
+        s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="text/plain")
+
+        # GET
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        got = resp["Body"].read()
+
+        if got != body:
+            out["jobs_s3"] = "error: mismatch readback"
+        else:
+            out["jobs_s3"] = "ok"
+
+        # DELETE (cleanup)
+        try:
+            s3.delete_object(Bucket=bucket, Key=key)
+        except Exception:
+            pass
+
+    except Exception as e:
+        out["jobs_s3"] = f"error: {str(e)}"
+
+    return out
+
+# ------------------------------------------------------------------
 # REDIS (Render-safe, OPTIONAL)
 # ------------------------------------------------------------------
 REDIS_URL = os.environ.get("REDIS_URL", "").strip()
