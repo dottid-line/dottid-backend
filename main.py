@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import re
 import time
+import hashlib
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +81,53 @@ def debug_ping(request: Request):
         "origin": request.headers.get("origin"),
         "referer": request.headers.get("referer"),
     }
+
+# ------------------------------------------------------------------
+# JOBS S3 (Uploads + Inputs + Outputs) - REQUIRED FOR AUTOSCALING
+# ------------------------------------------------------------------
+JOBS_S3_BUCKET = (os.environ.get("JOBS_S3_BUCKET", "") or "").strip()
+JOBS_AWS_REGION = (os.environ.get("JOBS_AWS_REGION", "") or "").strip()
+JOBS_AWS_ACCESS_KEY_ID = (os.environ.get("JOBS_AWS_ACCESS_KEY_ID", "") or "").strip()
+JOBS_AWS_SECRET_ACCESS_KEY = (os.environ.get("JOBS_AWS_SECRET_ACCESS_KEY", "") or "").strip()
+
+_jobs_s3_client = None
+
+def _jobs_s3():
+    global _jobs_s3_client
+    if _jobs_s3_client is not None:
+        return _jobs_s3_client
+    if not (JOBS_S3_BUCKET and JOBS_AWS_REGION and JOBS_AWS_ACCESS_KEY_ID and JOBS_AWS_SECRET_ACCESS_KEY):
+        raise RuntimeError("Jobs S3 not configured (missing JOBS_* env vars)")
+    import boto3
+    _jobs_s3_client = boto3.client(
+        "s3",
+        region_name=JOBS_AWS_REGION,
+        aws_access_key_id=JOBS_AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=JOBS_AWS_SECRET_ACCESS_KEY,
+    )
+    return _jobs_s3_client
+
+def s3_put_json(key: str, data: dict):
+    body = json.dumps(data).encode("utf-8")
+    _jobs_s3().put_object(
+        Bucket=JOBS_S3_BUCKET,
+        Key=key,
+        Body=body,
+        ContentType="application/json",
+    )
+
+def s3_get_json(key: str) -> dict:
+    resp = _jobs_s3().get_object(Bucket=JOBS_S3_BUCKET, Key=key)
+    raw = resp["Body"].read()
+    return json.loads(raw.decode("utf-8"))
+
+def s3_put_bytes(key: str, b: bytes, content_type: str = "application/octet-stream"):
+    _jobs_s3().put_object(
+        Bucket=JOBS_S3_BUCKET,
+        Key=key,
+        Body=b,
+        ContentType=content_type,
+    )
 
 # ------------------------------------------------------------------
 # OPS: SELF TEST (Redis + Jobs S3)
@@ -155,35 +203,24 @@ def ops_self_test():
     return out
 
 # ------------------------------------------------------------------
-# REDIS (Render-safe, OPTIONAL)
+# REDIS (Render-safe) - REQUIRED FOR AUTOSCALING
 # ------------------------------------------------------------------
 REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 
-# Fallback: in-memory job store if REDIS_URL not set OR redis not installed
-_inmem_jobs = {}
+if not (REDIS_URL and redis is not None):
+    raise RuntimeError("REDIS_URL not set or redis library missing; Redis is required for autoscaling")
 
-if REDIS_URL and redis is not None:
-    try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        redis_client.ping()
-    except Exception:
-        redis_client = None
-else:
-    redis_client = None
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+redis_client.ping()
 
 JOB_TTL_SECONDS = 60 * 60 * 24  # 24 hours
 
 def save_job(job_id: str, data: dict):
-    if redis_client:
-        redis_client.set(f"job:{job_id}", json.dumps(data), ex=JOB_TTL_SECONDS)
-    else:
-        _inmem_jobs[job_id] = data
+    redis_client.set(f"job:{job_id}", json.dumps(data), ex=JOB_TTL_SECONDS)
 
 def load_job(job_id: str) -> Optional[dict]:
-    if redis_client:
-        raw = redis_client.get(f"job:{job_id}")
-        return json.loads(raw) if raw else None
-    return _inmem_jobs.get(job_id)
+    raw = redis_client.get(f"job:{job_id}")
+    return json.loads(raw) if raw else None
 
 # ------------------------------------------------------------------
 # CACHE SETTINGS (OPTIONAL; DISK-BASED)
@@ -433,22 +470,32 @@ def process_job(job_id: str, payload: dict):
                 pass
 
         subject = payload.get("subject", {}) or {}
-        image_blobs = payload.get("image_blobs", []) or []
+        uploaded_s3_keys = payload.get("uploaded_s3_keys", []) or []
 
         log("START process_job()")
         log(f"Input address='{subject.get('address','')}' beds={subject.get('beds')} baths={subject.get('baths')} sqft={subject.get('sqft')} year_built={subject.get('year_built')}")
         log(f"Input deal_type='{subject.get('deal_type','')}' assignment_fee='{subject.get('assignment_fee','')}' condition='{subject.get('condition','')}' units='{subject.get('units','')}'")
-        log(f"Images received (raw upload count) = {len(image_blobs)}")
+        log(f"User-uploaded images (S3 keys) count = {len(uploaded_s3_keys)}")
 
-        t_save_start = time.perf_counter()
-        img_info = _save_uploaded_images_to_temp(image_blobs)
-        t_save_end = time.perf_counter()
+        # Download user-uploaded images from S3 into temp for underwriting
+        temp_dir = tempfile.mkdtemp(prefix="dottid_")
+        paths = []
 
-        subject["uploaded_image_paths"] = img_info.get("files", [])
-        subject["uploaded_image_temp_dir"] = img_info.get("temp_dir")
+        for key in uploaded_s3_keys:
+            try:
+                resp = _jobs_s3().get_object(Bucket=JOBS_S3_BUCKET, Key=key)
+                b = resp["Body"].read()
+                out_path = os.path.join(temp_dir, os.path.basename(key))
+                with open(out_path, "wb") as f:
+                    f.write(b)
+                paths.append(out_path)
+            except Exception:
+                continue
 
-        log(f"Saved images to temp. temp_dir='{subject.get('uploaded_image_temp_dir')}' valid_saved_files={len(subject.get('uploaded_image_paths') or [])}")
-        log(f"TIMING saved_upload_images_seconds={(t_save_end - t_save_start):.3f}")
+        subject["uploaded_image_paths"] = paths
+        subject["uploaded_image_temp_dir"] = temp_dir
+
+        log(f"Downloaded images to temp. temp_dir='{temp_dir}' valid_files={len(paths)}")
 
         log("Calling run_full_underwrite(subject)...")
         t_underwrite_start = time.perf_counter()
@@ -483,6 +530,11 @@ def process_job(job_id: str, payload: dict):
                 "comps": [],
             }
             job["error"] = None
+
+            outputs_key = f"jobs/outputs/{job_id}.json"
+            s3_put_json(outputs_key, job["result"])
+            job["outputs_s3_key"] = outputs_key
+
             job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
 
@@ -525,6 +577,11 @@ def process_job(job_id: str, payload: dict):
                 "comps": [],
             }
             job["error"] = None
+
+            outputs_key = f"jobs/outputs/{job_id}.json"
+            s3_put_json(outputs_key, job["result"])
+            job["outputs_s3_key"] = outputs_key
+
             job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
 
@@ -567,6 +624,11 @@ def process_job(job_id: str, payload: dict):
                 "comps": [],
             }
             job["error"] = None
+
+            outputs_key = f"jobs/outputs/{job_id}.json"
+            s3_put_json(outputs_key, job["result"])
+            job["outputs_s3_key"] = outputs_key
+
             job["updated_at"] = datetime.utcnow().isoformat()
             save_job(job_id, job)
 
@@ -674,6 +736,10 @@ def process_job(job_id: str, payload: dict):
         }
         job["error"] = None
 
+        outputs_key = f"jobs/outputs/{job_id}.json"
+        s3_put_json(outputs_key, job["result"])
+        job["outputs_s3_key"] = outputs_key
+
         log("FINAL RESULT (will be returned by GET /jobs/results/{job_id}):")
         try:
             log(json.dumps(job["result"], indent=2))
@@ -706,18 +772,31 @@ async def create_job(form_data: Optional[str] = Form(None)):
     subject = _build_subject(parsed)
 
     job_id = str(uuid.uuid4())
+    created_at = datetime.utcnow().isoformat()
+
+    inputs_key = f"jobs/inputs/{job_id}.json"
+    s3_put_json(inputs_key, {
+        "job_id": job_id,
+        "created_at": created_at,
+        "subject": subject,
+        "uploaded_image_s3_keys": [],
+    })
+
     job = {
         "job_id": job_id,
         "status": "queued",
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
+        "created_at": created_at,
+        "updated_at": created_at,
+        "inputs_s3_key": inputs_key,
+        "uploads_s3_keys": [],
+        "outputs_s3_key": f"jobs/outputs/{job_id}.json",
         "input": {"address": subject.get("address", ""), "images_received": 0},
-        "result": None,
         "error": None,
+        "result": None,
     }
     save_job(job_id, job)
 
-    executor.submit(process_job, job_id, {"subject": subject, "image_blobs": []})
+    executor.submit(process_job, job_id, {"subject": subject, "uploaded_s3_keys": []})
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -726,25 +805,52 @@ async def start_job(form_data: Optional[str] = Form(None), images: List[UploadFi
     parsed = json.loads(form_data) if form_data else {}
     subject = _build_subject(parsed)
 
-    image_blobs = []
+    job_id = str(uuid.uuid4())
+    created_at = datetime.utcnow().isoformat()
+
+    uploaded_keys = []
+    image_count = 0
+
     for img in images or []:
         raw = await img.read()
-        if raw:
-            image_blobs.append((img.filename or "image", raw))
+        if not raw:
+            continue
 
-    job_id = str(uuid.uuid4())
+        try:
+            jpeg_bytes, out_name = normalize_upload_to_jpeg_bytes(img.filename or "image", raw)
+        except Exception:
+            continue
+
+        h = hashlib.sha1(jpeg_bytes).hexdigest()[:12]
+        key = f"jobs/uploads/{job_id}/{h}-{out_name}"
+        s3_put_bytes(key, jpeg_bytes, content_type="image/jpeg")
+
+        uploaded_keys.append(key)
+        image_count += 1
+
+    inputs_key = f"jobs/inputs/{job_id}.json"
+    s3_put_json(inputs_key, {
+        "job_id": job_id,
+        "created_at": created_at,
+        "subject": subject,
+        "uploaded_image_s3_keys": uploaded_keys,
+    })
+
     job = {
         "job_id": job_id,
         "status": "queued",
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
-        "input": {"address": subject.get("address", ""), "images_received": len(image_blobs)},
-        "result": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "inputs_s3_key": inputs_key,
+        "uploads_s3_keys": uploaded_keys,
+        "outputs_s3_key": f"jobs/outputs/{job_id}.json",
+        "input": {"address": subject.get("address", ""), "images_received": image_count},
         "error": None,
+        "result": None,
     }
 
     save_job(job_id, job)
-    executor.submit(process_job, job_id, {"subject": subject, "image_blobs": image_blobs})
+    executor.submit(process_job, job_id, {"subject": subject, "uploaded_s3_keys": uploaded_keys})
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -784,7 +890,11 @@ def job_results(job_id: str):
     if job.get("status") != "complete":
         return {"error": "not_ready"}
 
-    return job.get("result")
+    outputs_key = job.get("outputs_s3_key") or f"jobs/outputs/{job_id}.json"
+    try:
+        return s3_get_json(outputs_key)
+    except Exception:
+        return job.get("result") or {"error": "not_ready"}
 
 # ------------------------------------------------------------------
 # EMAIL LEADS (OPTION B)
