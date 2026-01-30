@@ -440,6 +440,18 @@ def _build_subject(parsed: dict) -> dict:
     }
 
 # ------------------------------------------------------------------
+# CHANGE: build a safe S3 "folder" name from address
+# ------------------------------------------------------------------
+def _address_to_s3_prefix(address: str) -> str:
+    a = (address or "").strip().lower()
+    if not a:
+        return "unknown-address"
+    a = re.sub(r"[^a-z0-9]+", "-", a).strip("-")
+    if not a:
+        return "unknown-address"
+    return a[:120]
+
+# ------------------------------------------------------------------
 # PROCESS JOB
 # ------------------------------------------------------------------
 def process_job(job_id: str, payload: dict):
@@ -811,6 +823,9 @@ async def start_job(form_data: Optional[str] = Form(None), images: List[UploadFi
     uploaded_keys = []
     image_count = 0
 
+    # CHANGE: address-based "folder" prefix in S3
+    address_prefix = _address_to_s3_prefix(subject.get("address", ""))
+
     for img in images or []:
         raw = await img.read()
         if not raw:
@@ -822,7 +837,7 @@ async def start_job(form_data: Optional[str] = Form(None), images: List[UploadFi
             continue
 
         h = hashlib.sha1(jpeg_bytes).hexdigest()[:12]
-        key = f"jobs/uploads/{job_id}/{h}-{out_name}"
+        key = f"jobs/uploads/{address_prefix}/{job_id}/{h}-{out_name}"
         s3_put_bytes(key, jpeg_bytes, content_type="image/jpeg")
 
         uploaded_keys.append(key)
