@@ -144,9 +144,11 @@ def process_one_job(job_id: str):
         log(f"already complete: {job_id}")
         return
 
-    # Move status -> processing
+    # CHANGE: mark started_at at the moment underwriting is about to begin
+    # This is what main.py uses to distinguish "not started after 60s" vs "started but taking too long"
     job["status"] = "processing"
-    job["updated_at"] = datetime.utcnow().isoformat()
+    job["started_at"] = datetime.utcnow().isoformat()
+    job["updated_at"] = job["started_at"]
     save_job(job_id, job)
 
     try:
