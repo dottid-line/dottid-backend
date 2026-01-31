@@ -227,15 +227,18 @@ def load_job(job_id: str) -> Optional[dict]:
 # ------------------------------------------------------------------
 JOBS_QUEUE_KEY = (os.environ.get("JOBS_QUEUE_KEY", "") or "").strip() or "jobs:pending"
 
+# CHANGE: defaults aligned to your rules
+# - If it hasn't started within 60s -> "high traffic, try again later"
+# - If it started but exceeds 240s (4 min) -> "something went wrong, try again"
 try:
-    JOB_START_TIMEOUT_SECONDS = int((os.environ.get("JOB_START_TIMEOUT_SECONDS", "90") or "90").strip())
+    JOB_START_TIMEOUT_SECONDS = int((os.environ.get("JOB_START_TIMEOUT_SECONDS", "60") or "60").strip())
 except Exception:
-    JOB_START_TIMEOUT_SECONDS = 90
+    JOB_START_TIMEOUT_SECONDS = 60
 
 try:
-    JOB_MAX_WAIT_SECONDS = int((os.environ.get("JOB_MAX_WAIT_SECONDS", "300") or "300").strip())
+    JOB_MAX_WAIT_SECONDS = int((os.environ.get("JOB_MAX_WAIT_SECONDS", "240") or "240").strip())
 except Exception:
-    JOB_MAX_WAIT_SECONDS = 300
+    JOB_MAX_WAIT_SECONDS = 240
 
 def enqueue_job(job_id: str):
     # Worker will BLPOP this list key
@@ -924,29 +927,51 @@ def job_status(job_id: str):
 def job_results(job_id: str):
     job = load_job(job_id)
     if not job:
-        return {"error": "not_found"}
+        return {"status": "not_found"}
 
-    # CHANGE: failed jobs should be terminal (not "not_ready" forever)
+    # Terminal failure
     if job.get("status") == "failed":
-        return {"error": "failed", "message": job.get("error") or "Unknown error"}
+        return {
+            "status": "failed",
+            "message": job.get("error") or "Something went wrong—try again.",
+        }
 
+    # Not complete yet: enforce your two UI-trigger rules
     if job.get("status") != "complete":
-        # CHANGE: starting/retry logic for autoscaling queue delays
+        now = datetime.utcnow()
+
         created_dt = _parse_iso_dt(job.get("created_at"))
-        if created_dt is not None:
-            age = (datetime.utcnow() - created_dt).total_seconds()
-            if age > float(JOB_MAX_WAIT_SECONDS):
-                return {"status": "retry", "message": "High demand right now—please retry in a moment."}
-            if age > float(JOB_START_TIMEOUT_SECONDS):
-                return {"status": "starting", "message": "High demand right now—starting your run. Keep this tab open."}
+        started_dt = _parse_iso_dt(job.get("started_at"))  # worker should set this when underwriting actually begins
 
-        return {"error": "not_ready"}
+        # Rule 1: Not started after 60s (still queued, no started_at)
+        if (started_dt is None) and (job.get("status") == "queued") and (created_dt is not None):
+            age = (now - created_dt).total_seconds()
+            if age >= float(JOB_START_TIMEOUT_SECONDS):
+                return {
+                    "status": "high_traffic",
+                    "message": "High traffic—try again later.",
+                }
+            return {"status": "queued"}
 
+        # Rule 2: Started but underwriting taking too long (>= 4 minutes since started_at)
+        if (started_dt is not None) and (job.get("status") in ["processing", "queued"]):
+            run_age = (now - started_dt).total_seconds()
+            if run_age >= float(JOB_MAX_WAIT_SECONDS):
+                return {
+                    "status": "failed",
+                    "message": "Something went wrong—try again.",
+                }
+            return {"status": "processing"}
+
+        # Fallback for any other in-progress state
+        return {"status": job.get("status") or "queued"}
+
+    # Complete: return result
     outputs_key = job.get("outputs_s3_key") or f"jobs/outputs/{job_id}.json"
     try:
         return s3_get_json(outputs_key)
     except Exception:
-        return job.get("result") or {"error": "not_ready"}
+        return job.get("result") or {"status": "processing"}
 
 # ------------------------------------------------------------------
 # EMAIL LEADS (OPTION B)
